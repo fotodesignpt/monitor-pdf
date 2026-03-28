@@ -1,8 +1,5 @@
 streamlit
-pymupdf
-beautifulsoup4
+PyMuPDF
 requests
-pillow
+beautifulsoup4
 apscheduler
-scikit-learn
-psycopg2-binary
