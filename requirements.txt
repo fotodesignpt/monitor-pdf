@@ -3,3 +3,5 @@ PyMuPDF
 requests
 beautifulsoup4
 apscheduler
+Pillow
+imagehash
