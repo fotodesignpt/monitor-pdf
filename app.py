@@ -1,5 +1,5 @@
 import streamlit as st
-import fitz  # PyMuPDF
+import fitz
 import requests
 from bs4 import BeautifulSoup
 from datetime import datetime
@@ -8,19 +8,16 @@ from apscheduler.schedulers.background import BackgroundScheduler
 import os
 
 DB_FILE = "local.db"
+IMG_FOLDER = "images"
+os.makedirs(IMG_FOLDER, exist_ok=True)
 
 def init_db():
     conn = sqlite3.connect(DB_FILE)
     cur = conn.cursor()
-    cur.execute(
-        "CREATE TABLE IF NOT EXISTS pdfs (id INTEGER PRIMARY KEY AUTOINCREMENT, path TEXT)"
-    )
-    cur.execute(
-        "CREATE TABLE IF NOT EXISTS sites (id INTEGER PRIMARY KEY AUTOINCREMENT, url TEXT)"
-    )
-    cur.execute(
-        "CREATE TABLE IF NOT EXISTS matches (id INTEGER PRIMARY KEY AUTOINCREMENT, pdf TEXT, site TEXT, similarity REAL, date TEXT)"
-    )
+    cur.execute("CREATE TABLE IF NOT EXISTS pdfs (id INTEGER PRIMARY KEY AUTOINCREMENT, path TEXT)")
+    cur.execute("CREATE TABLE IF NOT EXISTS sites (id INTEGER PRIMARY KEY AUTOINCREMENT, url TEXT)")
+    cur.execute("CREATE TABLE IF NOT EXISTS matches (id INTEGER PRIMARY KEY AUTOINCREMENT, pdf TEXT, site TEXT, similarity REAL, date TEXT)")
+    cur.execute("CREATE TABLE IF NOT EXISTS pdf_images (id INTEGER PRIMARY KEY AUTOINCREMENT, pdf TEXT, image_path TEXT)")
     conn.commit()
     conn.close()
 
@@ -29,20 +26,31 @@ def get_conn():
 
 init_db()
 
-def simple_compare(pdf_texts, site_texts):
-    matches = []
-    for pdf_name, pdf_content in pdf_texts.items():
-        for site_name, site_content in site_texts.items():
-            if pdf_content.strip()[:20] in site_content:
-                matches.append((pdf_name, site_name, 0.95, datetime.now().isoformat()))
-    return matches
-
 def extract_pdf_text(file):
     doc = fitz.open(file)
     text = ""
     for page in doc:
         text += page.get_text()
     return text
+
+def extract_pdf_images(file, pdf_name):
+    doc = fitz.open(file)
+    image_paths = []
+    for i, page in enumerate(doc):
+        for img_index, img in enumerate(page.get_images(full=True)):
+            xref = img[0]
+            pix = fitz.Pixmap(doc, xref)
+            if pix.n < 5:
+                img_path = os.path.join(IMG_FOLDER, f"{pdf_name}_p{i+1}_img{img_index+1}.png")
+                pix.save(img_path)
+            else:
+                pix0 = fitz.Pixmap(fitz.csRGB, pix)
+                img_path = os.path.join(IMG_FOLDER, f"{pdf_name}_p{i+1}_img{img_index+1}.png")
+                pix0.save(img_path)
+                pix0 = None
+            pix = None
+            image_paths.append(img_path)
+    return image_paths
 
 def extract_site_text(url):
     try:
@@ -51,6 +59,14 @@ def extract_site_text(url):
         return soup.get_text()
     except:
         return ""
+
+def simple_compare(pdf_texts, site_texts):
+    matches = []
+    for pdf_name, pdf_content in pdf_texts.items():
+        for site_name, site_content in site_texts.items():
+            if pdf_content.strip()[:20] in site_content:
+                matches.append((pdf_name, site_name, 0.95, datetime.now().isoformat()))
+    return matches
 
 def run_check():
     conn = get_conn()
@@ -63,11 +79,10 @@ def run_check():
     site_texts = {row[1]: extract_site_text(row[1]) for row in site_rows}
     matches = simple_compare(pdf_texts, site_texts)
     for pdf_name, site_name, sim, date in matches:
-        cur.execute(
-            "INSERT INTO matches (pdf, site, similarity, date) VALUES (?,?,?,?)",
-            (pdf_name, site_name, sim, date),
-        )
+        cur.execute("INSERT INTO matches (pdf, site, similarity, date) VALUES (?,?,?,?)",
+                    (pdf_name, site_name, sim, date))
     conn.commit()
+    cur.close()
     conn.close()
 
 scheduler = BackgroundScheduler()
@@ -76,30 +91,36 @@ scheduler.start()
 
 st.title("Monitor de PDFs e Sites (SQLite local)")
 
-st.subheader("Carregar PDF")
-uploaded_pdf = st.file_uploader("Escolha um PDF", type=["pdf"])
-if uploaded_pdf is not None:
-    save_path = os.path.join(os.getcwd(), uploaded_pdf.name)
-    with open(save_path, "wb") as f:
-        f.write(uploaded_pdf.getbuffer())
+st.subheader("Carregar PDFs")
+uploaded_pdfs = st.file_uploader("Escolha um ou mais PDFs", type=["pdf"], accept_multiple_files=True)
+if uploaded_pdfs:
     conn = get_conn()
     cur = conn.cursor()
-    cur.execute("INSERT INTO pdfs (path) VALUES (?)", (save_path,))
+    for pdf_file in uploaded_pdfs:
+        save_path = os.path.join(os.getcwd(), pdf_file.name)
+        with open(save_path, "wb") as f:
+            f.write(pdf_file.getbuffer())
+        cur.execute("INSERT INTO pdfs (path) VALUES (?)", (save_path,))
+        image_paths = extract_pdf_images(save_path, os.path.splitext(pdf_file.name)[0])
+        for img_path in image_paths:
+            cur.execute("INSERT INTO pdf_images (pdf, image_path) VALUES (?,?)", (pdf_file.name, img_path))
     conn.commit()
     cur.close()
     conn.close()
-    st.success("PDF carregado!")
+    st.success(f"{len(uploaded_pdfs)} PDFs carregados e imagens extraídas!")
 
-st.subheader("Adicionar Site")
-site_url = st.text_input("Endereço do site")
-if st.button("Adicionar site") and site_url:
+st.subheader("Adicionar Sites")
+sites_input = st.text_area("Cole os URLs separados por vírgula ou linha")
+if st.button("Adicionar sites") and sites_input:
+    urls = [url.strip() for url in sites_input.replace("\n", ",").split(",") if url.strip()]
     conn = get_conn()
     cur = conn.cursor()
-    cur.execute("INSERT INTO sites (url) VALUES (?)", (site_url,))
+    for url in urls:
+        cur.execute("INSERT INTO sites (url) VALUES (?)", (url,))
     conn.commit()
     cur.close()
     conn.close()
-    st.success("Site adicionado!")
+    st.success(f"{len(urls)} sites adicionados!")
 
 st.subheader("Resultados encontrados")
 conn = get_conn()
