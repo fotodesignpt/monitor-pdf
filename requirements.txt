@@ -1,12 +1,8 @@
 streamlit
-paddleocr
 pymupdf
 beautifulsoup4
 requests
-open_clip_torch
-torch
 pillow
-imagehash
 apscheduler
 scikit-learn
 psycopg2-binary
