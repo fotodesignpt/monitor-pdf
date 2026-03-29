@@ -18,8 +18,13 @@ os.makedirs(IMG_FOLDER, exist_ok=True)
 os.makedirs(PDF_FOLDER, exist_ok=True)
 
 # ---------------- DB ----------------
+def get_conn():
+    conn = sqlite3.connect(DB_FILE, timeout=30, check_same_thread=False)
+    conn.execute("PRAGMA journal_mode=WAL;")
+    return conn
+
 def init_db():
-    conn = sqlite3.connect(DB_FILE)
+    conn = get_conn()
     cur = conn.cursor()
 
     cur.execute("CREATE TABLE IF NOT EXISTS pdfs (path TEXT UNIQUE)")
@@ -42,9 +47,6 @@ def init_db():
 
     conn.commit()
     conn.close()
-
-def get_conn():
-    return sqlite3.connect(DB_FILE)
 
 init_db()
 
@@ -84,7 +86,7 @@ def extract_pdf_images(file_path, pdf_name):
                 except:
                     continue
     except Exception as e:
-        st.error(f"Erro ao processar PDF {pdf_name}: {e}")
+        st.error(f"Erro PDF {pdf_name}: {e}")
 
     return results
 
@@ -160,12 +162,12 @@ menu = st.sidebar.selectbox("Menu", ["Upload", "Miniaturas", "Resultados", "Debu
 
 # -------- Upload --------
 if menu == "Upload":
-    st.title("📥 PDFs e Sites")
+    st.title("PDFs e Sites")
 
     conn = get_conn()
     cur = conn.cursor()
 
-    uploaded_pdfs = st.file_uploader("Carregar PDFs", type=["pdf"], accept_multiple_files=True)
+    uploaded_pdfs = st.file_uploader("PDFs", type=["pdf"], accept_multiple_files=True)
 
     if uploaded_pdfs:
         for pdf_file in uploaded_pdfs:
@@ -175,10 +177,6 @@ if menu == "Upload":
 
                 with open(save_path, "wb") as f:
                     f.write(pdf_file.read())
-
-                if not os.path.exists(save_path):
-                    st.error(f"Erro ao guardar {filename}")
-                    continue
 
                 cur.execute("INSERT OR IGNORE INTO pdfs (path) VALUES (?)", (save_path,))
 
@@ -190,51 +188,34 @@ if menu == "Upload":
                     VALUES (?,?,?,?)
                     """, (filename, path, ref, h))
 
-                st.success(f"PDF OK: {filename}")
+                st.success(f"OK: {filename}")
 
             except Exception as e:
-                st.error(f"Erro no PDF {pdf_file.name}: {e}")
+                st.error(f"Erro: {e}")
 
         conn.commit()
+        conn.close()
 
-    st.subheader("🌐 Sites")
-    sites = st.text_area("URLs (uma por linha)")
+    st.subheader("Sites")
+    sites = st.text_area("URLs (1 por linha)")
 
     if st.button("Guardar sites"):
-        try:
-            for url in sites.split("\n"):
-                url = url.strip()
-                if url:
-                    cur.execute("INSERT OR IGNORE INTO sites (url) VALUES (?)", (url,))
-            conn.commit()
-            st.success("Sites guardados")
-        except Exception as e:
-            st.error(f"Erro a guardar sites: {e}")
+        conn = get_conn()
+        cur = conn.cursor()
+        for url in sites.split("\n"):
+            url = url.strip()
+            if url:
+                cur.execute("INSERT OR IGNORE INTO sites (url) VALUES (?)", (url,))
+        conn.commit()
+        conn.close()
+        st.success("Sites guardados")
 
-    if st.button("🔍 Testar sites"):
-        cur.execute("SELECT url FROM sites")
-        for (url,) in cur.fetchall():
-            imgs = extract_site_images(url)
-            st.write(url, "→", len(imgs), "imagens")
-
-    if st.button("🚀 Pesquisar agora"):
+    if st.button("Pesquisar agora"):
         run_check()
-        st.success("Pesquisa feita")
-
-    st.subheader("PDFs guardados")
-    cur.execute("SELECT path FROM pdfs")
-    st.write(cur.fetchall())
-
-    st.subheader("Sites guardados")
-    cur.execute("SELECT url FROM sites")
-    st.write(cur.fetchall())
-
-    conn.close()
+        st.success("Pesquisa concluída")
 
 # -------- Miniaturas --------
 elif menu == "Miniaturas":
-    st.title("🖼️ Miniaturas")
-
     conn = get_conn()
     cur = conn.cursor()
 
@@ -243,7 +224,6 @@ elif menu == "Miniaturas":
 
     if pdfs:
         selected = st.selectbox("PDF", pdfs)
-
         cur.execute("SELECT image_path FROM pdf_images WHERE pdf=?", (selected,))
         rows = cur.fetchall()
 
@@ -253,45 +233,34 @@ elif menu == "Miniaturas":
             if os.path.exists(path):
                 cols[i % 5].image(path)
                 i += 1
-    else:
-        st.write("Sem imagens ainda")
 
     conn.close()
 
 # -------- Resultados --------
 elif menu == "Resultados":
-    st.title("📊 Resultados")
-
     conn = get_conn()
     cur = conn.cursor()
 
     cur.execute("SELECT pdf, image_ref, site, image_url, similarity, date FROM matches ORDER BY date DESC")
-    rows = cur.fetchall()
-
-    if rows:
-        for r in rows:
-            st.write(r)
-    else:
-        st.write("Sem resultados ainda")
+    for row in cur.fetchall():
+        st.write(row)
 
     conn.close()
 
 # -------- Debug --------
 elif menu == "Debug":
-    st.title("Debug")
-
     conn = get_conn()
     cur = conn.cursor()
 
-    st.write("PDFs:")
+    st.write("PDFs")
     cur.execute("SELECT * FROM pdfs")
     st.write(cur.fetchall())
 
-    st.write("Sites:")
+    st.write("Sites")
     cur.execute("SELECT * FROM sites")
     st.write(cur.fetchall())
 
-    st.write("Imagens:")
+    st.write("Imagens")
     cur.execute("SELECT * FROM pdf_images LIMIT 20")
     st.write(cur.fetchall())
 
