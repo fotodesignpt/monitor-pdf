@@ -4,7 +4,6 @@ import requests
 from bs4 import BeautifulSoup
 from datetime import datetime
 import sqlite3
-from apscheduler.schedulers.background import BackgroundScheduler
 import os
 from PIL import Image
 import imagehash
@@ -84,8 +83,8 @@ def extract_pdf_images(file_path, pdf_name):
                         results.append((path, ref, h))
                 except:
                     continue
-    except:
-        st.error(f"Erro ao processar PDF: {pdf_name}")
+    except Exception as e:
+        st.error(f"Erro ao processar PDF {pdf_name}: {e}")
 
     return results
 
@@ -101,8 +100,7 @@ def extract_site_images(url):
         for img in soup.find_all("img"):
             src = img.get("src")
             if src:
-                full_url = urljoin(url, src)
-                imgs.append(full_url)
+                imgs.append(urljoin(url, src))
 
         return list(set(imgs))
     except:
@@ -126,8 +124,7 @@ def run_check():
     cur.execute("SELECT url FROM sites")
     sites = cur.fetchall()
 
-    for site in sites:
-        site_url = site[0]
+    for (site_url,) in sites:
         site_imgs = extract_site_images(site_url)
 
         for img_url in site_imgs:
@@ -157,11 +154,6 @@ def run_check():
     conn.commit()
     conn.close()
 
-# ---------------- SCHEDULER ----------------
-scheduler = BackgroundScheduler()
-scheduler.add_job(run_check, "interval", hours=6)
-scheduler.start()
-
 # ---------------- UI ----------------
 st.set_page_config(layout="wide")
 menu = st.sidebar.selectbox("Menu", ["Upload", "Miniaturas", "Resultados", "Debug"])
@@ -173,58 +165,63 @@ if menu == "Upload":
     conn = get_conn()
     cur = conn.cursor()
 
-    uploaded_pdfs = st.file_uploader("PDFs", type=["pdf"], accept_multiple_files=True)
+    uploaded_pdfs = st.file_uploader("Carregar PDFs", type=["pdf"], accept_multiple_files=True)
 
     if uploaded_pdfs:
         for pdf_file in uploaded_pdfs:
             try:
-                save_path = os.path.join(PDF_FOLDER, pdf_file.name)
-
-                cur.execute("SELECT 1 FROM pdfs WHERE path=?", (save_path,))
-                if cur.fetchone():
-                    continue
+                filename = pdf_file.name.replace(" ", "_")
+                save_path = os.path.join(PDF_FOLDER, filename)
 
                 with open(save_path, "wb") as f:
-                    f.write(pdf_file.getbuffer())
+                    f.write(pdf_file.read())
 
-                cur.execute("INSERT INTO pdfs (path) VALUES (?)", (save_path,))
+                if not os.path.exists(save_path):
+                    st.error(f"Erro ao guardar {filename}")
+                    continue
 
-                images = extract_pdf_images(save_path, pdf_file.name)
+                cur.execute("INSERT OR IGNORE INTO pdfs (path) VALUES (?)", (save_path,))
+
+                images = extract_pdf_images(save_path, filename)
 
                 for path, ref, h in images:
                     cur.execute("""
                     INSERT OR IGNORE INTO pdf_images (pdf, image_path, ref, hash)
                     VALUES (?,?,?,?)
-                    """, (pdf_file.name, path, ref, h))
+                    """, (filename, path, ref, h))
 
-            except:
-                st.error(f"Erro no PDF: {pdf_file.name}")
+                st.success(f"PDF OK: {filename}")
+
+            except Exception as e:
+                st.error(f"Erro no PDF {pdf_file.name}: {e}")
 
         conn.commit()
-        st.success("PDFs processados")
 
-    st.subheader("Sites")
+    st.subheader("🌐 Sites")
     sites = st.text_area("URLs (uma por linha)")
 
     if st.button("Guardar sites"):
-        for url in sites.split("\n"):
-            url = url.strip()
-            if url:
-                cur.execute("INSERT OR IGNORE INTO sites (url) VALUES (?)", (url,))
-        conn.commit()
-        st.success("Sites guardados")
+        try:
+            for url in sites.split("\n"):
+                url = url.strip()
+                if url:
+                    cur.execute("INSERT OR IGNORE INTO sites (url) VALUES (?)", (url,))
+            conn.commit()
+            st.success("Sites guardados")
+        except Exception as e:
+            st.error(f"Erro a guardar sites: {e}")
 
     if st.button("🔍 Testar sites"):
         cur.execute("SELECT url FROM sites")
         for (url,) in cur.fetchall():
             imgs = extract_site_images(url)
-            st.write(url, "→", len(imgs), "imagens encontradas")
+            st.write(url, "→", len(imgs), "imagens")
 
     if st.button("🚀 Pesquisar agora"):
         run_check()
         st.success("Pesquisa feita")
 
-    st.subheader("PDFs carregados")
+    st.subheader("PDFs guardados")
     cur.execute("SELECT path FROM pdfs")
     st.write(cur.fetchall())
 
@@ -236,7 +233,7 @@ if menu == "Upload":
 
 # -------- Miniaturas --------
 elif menu == "Miniaturas":
-    st.title("Miniaturas")
+    st.title("🖼️ Miniaturas")
 
     conn = get_conn()
     cur = conn.cursor()
@@ -257,19 +254,18 @@ elif menu == "Miniaturas":
                 cols[i % 5].image(path)
                 i += 1
     else:
-        st.write("Sem miniaturas ainda")
+        st.write("Sem imagens ainda")
 
     conn.close()
 
 # -------- Resultados --------
 elif menu == "Resultados":
-    st.title("Resultados")
+    st.title("📊 Resultados")
 
     conn = get_conn()
     cur = conn.cursor()
 
     cur.execute("SELECT pdf, image_ref, site, image_url, similarity, date FROM matches ORDER BY date DESC")
-
     rows = cur.fetchall()
 
     if rows:
@@ -287,15 +283,15 @@ elif menu == "Debug":
     conn = get_conn()
     cur = conn.cursor()
 
-    st.subheader("PDFs")
+    st.write("PDFs:")
     cur.execute("SELECT * FROM pdfs")
     st.write(cur.fetchall())
 
-    st.subheader("Sites")
+    st.write("Sites:")
     cur.execute("SELECT * FROM sites")
     st.write(cur.fetchall())
 
-    st.subheader("Imagens")
+    st.write("Imagens:")
     cur.execute("SELECT * FROM pdf_images LIMIT 20")
     st.write(cur.fetchall())
 
