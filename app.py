@@ -204,13 +204,13 @@ if menu == "Upload":
         st.success("PDFs processados")
 
     st.subheader("Sites")
-    sites = st.text_area("URLs")
+    sites = st.text_area("URLs (uma por linha)")
 
     if st.button("Guardar sites"):
         for url in sites.split("\n"):
             url = url.strip()
             if url:
-                cur.execute("INSERT OR IGNORE INTO sites VALUES (?)", (url,))
+                cur.execute("INSERT OR IGNORE INTO sites (url) VALUES (?)", (url,))
         conn.commit()
         st.success("Sites guardados")
 
@@ -223,6 +223,14 @@ if menu == "Upload":
     if st.button("🚀 Pesquisar agora"):
         run_check()
         st.success("Pesquisa feita")
+
+    st.subheader("PDFs carregados")
+    cur.execute("SELECT path FROM pdfs")
+    st.write(cur.fetchall())
+
+    st.subheader("Sites guardados")
+    cur.execute("SELECT url FROM sites")
+    st.write(cur.fetchall())
 
     conn.close()
 
@@ -248,6 +256,8 @@ elif menu == "Miniaturas":
             if os.path.exists(path):
                 cols[i % 5].image(path)
                 i += 1
+    else:
+        st.write("Sem miniaturas ainda")
 
     conn.close()
 
@@ -259,8 +269,14 @@ elif menu == "Resultados":
     cur = conn.cursor()
 
     cur.execute("SELECT pdf, image_ref, site, image_url, similarity, date FROM matches ORDER BY date DESC")
-    for r in cur.fetchall():
-        st.write(r)
+
+    rows = cur.fetchall()
+
+    if rows:
+        for r in rows:
+            st.write(r)
+    else:
+        st.write("Sem resultados ainda")
 
     conn.close()
 
@@ -279,7 +295,7 @@ elif menu == "Debug":
     cur.execute("SELECT * FROM sites")
     st.write(cur.fetchall())
 
-    st.subheader("Imagens PDF")
+    st.subheader("Imagens")
     cur.execute("SELECT * FROM pdf_images LIMIT 20")
     st.write(cur.fetchall())
 
