@@ -24,7 +24,12 @@ def init_db():
 
     cur.execute("CREATE TABLE IF NOT EXISTS pdfs (path TEXT UNIQUE)")
     cur.execute("CREATE TABLE IF NOT EXISTS sites (url TEXT UNIQUE)")
-    cur.execute("CREATE TABLE IF NOT EXISTS pdf_images (pdf TEXT, image_path TEXT, ref TEXT UNIQUE, hash TEXT)")
+    cur.execute("""CREATE TABLE IF NOT EXISTS pdf_images (
+        pdf TEXT,
+        image_path TEXT,
+        ref TEXT UNIQUE,
+        hash TEXT
+    )""")
     cur.execute("""CREATE TABLE IF NOT EXISTS matches (
         pdf TEXT,
         image_ref TEXT,
@@ -121,11 +126,12 @@ def run_check():
                         cur.execute("""SELECT 1 FROM matches 
                                        WHERE image_ref=? AND image_url=?""",
                                     (ref, img_url))
+
                         if not cur.fetchone():
-                            cur.execute("""INSERT INTO matches 
-                                (pdf, image_ref, site, page_url, image_url, similarity, date)
-                                VALUES (?,?,?,?,?,?,?)""",
-                                (pdf, ref, site_url, site_url, img_url, diff, datetime.now().isoformat()))
+                            cur.execute("""
+                            INSERT INTO matches (pdf, image_ref, site, page_url, image_url, similarity, date)
+                            VALUES (?,?,?,?,?,?,?)
+                            """, (pdf, ref, site_url, site_url, img_url, diff, datetime.now().isoformat()))
                 except:
                     continue
 
@@ -166,19 +172,22 @@ if menu == "Upload":
             images = extract_pdf_images(save_path, pdf_file.name)
 
             for path, ref, h in images:
-                cur.execute("INSERT OR IGNORE INTO pdf_images VALUES (?,?,?,?)",
-                            (pdf_file.name, path, ref, h))
+                cur.execute("""
+                INSERT OR IGNORE INTO pdf_images (pdf, image_path, ref, hash)
+                VALUES (?,?,?,?)
+                """, (pdf_file.name, path, ref, h))
 
         conn.commit()
         st.success("PDFs carregados")
 
     st.subheader("🌐 Sites")
     sites = st.text_area("URLs (uma por linha)")
+
     if st.button("Guardar sites"):
         for url in sites.split("\n"):
             url = url.strip()
             if url:
-                cur.execute("INSERT OR IGNORE INTO sites VALUES (?)", (url,))
+                cur.execute("INSERT OR IGNORE INTO sites (url) VALUES (?)", (url,))
         conn.commit()
         st.success("Sites guardados")
 
@@ -191,6 +200,11 @@ if menu == "Upload":
     cur.execute("SELECT url FROM sites")
     for row in cur.fetchall():
         st.write(row[0])
+
+    # BOTÃO NOVO
+    if st.button("🔍 Pesquisar agora"):
+        run_check()
+        st.success("Pesquisa concluída")
 
     conn.close()
 
@@ -217,19 +231,22 @@ elif menu == "Miniaturas":
                 cols[i % 5].image(path)
                 i += 1
     else:
-        st.write("Nenhum PDF processado ainda")
+        st.write("Nenhum PDF ainda")
 
     conn.close()
 
 # -------- Resultados --------
 elif menu == "Resultados":
-    st.title("📊 Resultados encontrados")
+    st.title("📊 Resultados")
 
     conn = get_conn()
     cur = conn.cursor()
 
-    cur.execute("""SELECT pdf, image_ref, site, page_url, image_url, similarity, date 
-                   FROM matches ORDER BY date DESC""")
+    cur.execute("""
+    SELECT pdf, image_ref, site, page_url, image_url, similarity, date 
+    FROM matches ORDER BY date DESC
+    """)
+
     rows = cur.fetchall()
 
     if rows:
@@ -240,11 +257,11 @@ elif menu == "Resultados":
             **Site:** {r[2]}  
             **Página:** {r[3]}  
             **Imagem encontrada:** {r[4]}  
-            **Similaridade:** {r[5]}  
+            **Diferença:** {r[5]}  
             **Data:** {r[6]}  
             ---
             """)
     else:
-        st.write("Ainda não há resultados")
+        st.write("Sem resultados ainda")
 
     conn.close()
