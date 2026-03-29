@@ -4,18 +4,12 @@ import requests
 from bs4 import BeautifulSoup
 from datetime import datetime
 import sqlite3
-import os
 from PIL import Image
 import imagehash
 from io import BytesIO
 from urllib.parse import urljoin
 
 DB_FILE = "local.db"
-IMG_FOLDER = "images"
-PDF_FOLDER = "pdfs"
-
-os.makedirs(IMG_FOLDER, exist_ok=True)
-os.makedirs(PDF_FOLDER, exist_ok=True)
 
 # ---------------- DB ----------------
 def get_conn():
@@ -27,19 +21,20 @@ def init_db():
     conn = get_conn()
     cur = conn.cursor()
 
-    cur.execute("CREATE TABLE IF NOT EXISTS pdfs (path TEXT UNIQUE)")
+    cur.execute("CREATE TABLE IF NOT EXISTS pdfs (name TEXT UNIQUE, data BLOB)")
     cur.execute("CREATE TABLE IF NOT EXISTS sites (url TEXT UNIQUE)")
+
     cur.execute("""CREATE TABLE IF NOT EXISTS pdf_images (
         pdf TEXT,
-        image_path TEXT,
         ref TEXT UNIQUE,
-        hash TEXT
+        hash TEXT,
+        image BLOB
     )""")
+
     cur.execute("""CREATE TABLE IF NOT EXISTS matches (
         pdf TEXT,
         image_ref TEXT,
         site TEXT,
-        page_url TEXT,
         image_url TEXT,
         similarity INTEGER,
         date TEXT
@@ -58,10 +53,10 @@ def get_hash(img):
         return None
 
 # ---------------- PDF ----------------
-def extract_pdf_images(file_path, pdf_name):
+def extract_pdf_images(pdf_bytes, pdf_name):
     results = []
     try:
-        doc = fitz.open(file_path)
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
 
         for i, page in enumerate(doc):
             for img_index, img in enumerate(page.get_images(full=True)):
@@ -72,17 +67,14 @@ def extract_pdf_images(file_path, pdf_name):
                     if pix.n >= 5:
                         pix = fitz.Pixmap(fitz.csRGB, pix)
 
-                    ref = f"{pdf_name}_p{i+1}_img{img_index+1}"
-                    path = os.path.join(IMG_FOLDER, f"{ref}.png")
+                    img_bytes = pix.tobytes("png")
+                    img_pil = Image.open(BytesIO(img_bytes))
 
-                    if not os.path.exists(path):
-                        pix.save(path)
-
-                    img_pil = Image.open(path)
                     h = get_hash(img_pil)
+                    ref = f"{pdf_name}_p{i+1}_img{img_index+1}"
 
                     if h:
-                        results.append((path, ref, h))
+                        results.append((ref, h, img_bytes))
                 except:
                     continue
     except Exception as e:
@@ -120,7 +112,7 @@ def run_check():
     conn = get_conn()
     cur = conn.cursor()
 
-    cur.execute("SELECT pdf, image_path, ref, hash FROM pdf_images")
+    cur.execute("SELECT pdf, ref, hash FROM pdf_images")
     pdf_images = cur.fetchall()
 
     cur.execute("SELECT url FROM sites")
@@ -138,7 +130,7 @@ def run_check():
             if not site_hash:
                 continue
 
-            for pdf, path, ref, pdf_hash in pdf_images:
+            for pdf, ref, pdf_hash in pdf_images:
                 try:
                     diff = imagehash.hex_to_hash(pdf_hash) - imagehash.hex_to_hash(site_hash)
 
@@ -147,9 +139,9 @@ def run_check():
 
                         if not cur.fetchone():
                             cur.execute("""
-                            INSERT INTO matches (pdf, image_ref, site, page_url, image_url, similarity, date)
-                            VALUES (?,?,?,?,?,?,?)
-                            """, (pdf, ref, site_url, site_url, img_url, diff, datetime.now().isoformat()))
+                            INSERT INTO matches (pdf, image_ref, site, image_url, similarity, date)
+                            VALUES (?,?,?,?,?,?)
+                            """, (pdf, ref, site_url, img_url, diff, datetime.now().isoformat()))
                 except:
                     continue
 
@@ -158,110 +150,89 @@ def run_check():
 
 # ---------------- UI ----------------
 st.set_page_config(layout="wide")
-menu = st.sidebar.selectbox("Menu", ["Upload", "Miniaturas", "Resultados", "Debug"])
+menu = st.sidebar.selectbox("Menu", ["Upload", "Miniaturas", "Resultados"])
 
 # -------- Upload --------
 if menu == "Upload":
-    st.title("PDFs e Sites")
+    st.title("📥 PDFs e Sites")
 
     conn = get_conn()
     cur = conn.cursor()
 
-    uploaded_pdfs = st.file_uploader("PDFs", type=["pdf"], accept_multiple_files=True)
+    uploaded_pdfs = st.file_uploader("Carregar PDFs", type=["pdf"], accept_multiple_files=True)
 
     if uploaded_pdfs:
         for pdf_file in uploaded_pdfs:
             try:
-                filename = pdf_file.name.replace(" ", "_")
-                save_path = os.path.join(PDF_FOLDER, filename)
+                pdf_bytes = pdf_file.read()
+                name = pdf_file.name
 
-                with open(save_path, "wb") as f:
-                    f.write(pdf_file.read())
+                cur.execute("INSERT OR IGNORE INTO pdfs (name, data) VALUES (?,?)", (name, pdf_bytes))
 
-                cur.execute("INSERT OR IGNORE INTO pdfs (path) VALUES (?)", (save_path,))
+                images = extract_pdf_images(pdf_bytes, name)
 
-                images = extract_pdf_images(save_path, filename)
-
-                for path, ref, h in images:
+                for ref, h, img_bytes in images:
                     cur.execute("""
-                    INSERT OR IGNORE INTO pdf_images (pdf, image_path, ref, hash)
+                    INSERT OR IGNORE INTO pdf_images (pdf, ref, hash, image)
                     VALUES (?,?,?,?)
-                    """, (filename, path, ref, h))
+                    """, (name, ref, h, img_bytes))
 
-                st.success(f"OK: {filename}")
+                st.success(f"PDF OK: {name}")
 
             except Exception as e:
-                st.error(f"Erro: {e}")
+                st.error(f"Erro PDF: {e}")
 
         conn.commit()
-        conn.close()
 
-    st.subheader("Sites")
-    sites = st.text_area("URLs (1 por linha)")
+    sites = st.text_area("Sites (1 por linha)")
 
     if st.button("Guardar sites"):
-        conn = get_conn()
-        cur = conn.cursor()
         for url in sites.split("\n"):
             url = url.strip()
             if url:
                 cur.execute("INSERT OR IGNORE INTO sites (url) VALUES (?)", (url,))
         conn.commit()
-        conn.close()
         st.success("Sites guardados")
 
     if st.button("Pesquisar agora"):
         run_check()
-        st.success("Pesquisa concluída")
+        st.success("Pesquisa feita")
+
+    conn.close()
 
 # -------- Miniaturas --------
 elif menu == "Miniaturas":
+    st.title("🖼️ Miniaturas")
+
     conn = get_conn()
     cur = conn.cursor()
 
-    cur.execute("SELECT DISTINCT pdf FROM pdf_images")
-    pdfs = [r[0] for r in cur.fetchall()]
+    cur.execute("SELECT pdf, ref, image FROM pdf_images")
+    rows = cur.fetchall()
 
-    if pdfs:
-        selected = st.selectbox("PDF", pdfs)
-        cur.execute("SELECT image_path FROM pdf_images WHERE pdf=?", (selected,))
-        rows = cur.fetchall()
-
-        cols = st.columns(5)
-        i = 0
-        for (path,) in rows:
-            if os.path.exists(path):
-                cols[i % 5].image(path)
-                i += 1
+    cols = st.columns(5)
+    i = 0
+    for pdf, ref, img_bytes in rows:
+        try:
+            img = Image.open(BytesIO(img_bytes))
+            cols[i % 5].image(img, caption=ref)
+            i += 1
+        except:
+            continue
 
     conn.close()
 
 # -------- Resultados --------
 elif menu == "Resultados":
+    st.title("📊 Resultados")
+
     conn = get_conn()
     cur = conn.cursor()
 
     cur.execute("SELECT pdf, image_ref, site, image_url, similarity, date FROM matches ORDER BY date DESC")
-    for row in cur.fetchall():
-        st.write(row)
+    rows = cur.fetchall()
 
-    conn.close()
-
-# -------- Debug --------
-elif menu == "Debug":
-    conn = get_conn()
-    cur = conn.cursor()
-
-    st.write("PDFs")
-    cur.execute("SELECT * FROM pdfs")
-    st.write(cur.fetchall())
-
-    st.write("Sites")
-    cur.execute("SELECT * FROM sites")
-    st.write(cur.fetchall())
-
-    st.write("Imagens")
-    cur.execute("SELECT * FROM pdf_images LIMIT 20")
-    st.write(cur.fetchall())
+    for r in rows:
+        st.write(r)
 
     conn.close()
