@@ -21,22 +21,17 @@ def init_db():
     conn = get_conn()
     cur = conn.cursor()
 
-    cur.execute("DROP TABLE IF EXISTS pdfs")
-    cur.execute("DROP TABLE IF EXISTS pdf_images")
-    cur.execute("DROP TABLE IF EXISTS sites")
-    cur.execute("DROP TABLE IF EXISTS matches")
+    cur.execute("CREATE TABLE IF NOT EXISTS pdfs (name TEXT PRIMARY KEY, data BLOB)")
+    cur.execute("CREATE TABLE IF NOT EXISTS sites (url TEXT PRIMARY KEY)")
 
-    cur.execute("CREATE TABLE pdfs (name TEXT PRIMARY KEY, data BLOB)")
-    cur.execute("CREATE TABLE sites (url TEXT PRIMARY KEY)")
-
-    cur.execute("""CREATE TABLE pdf_images (
+    cur.execute("""CREATE TABLE IF NOT EXISTS pdf_images (
         pdf TEXT,
         ref TEXT PRIMARY KEY,
         hash TEXT,
         image BLOB
     )""")
 
-    cur.execute("""CREATE TABLE matches (
+    cur.execute("""CREATE TABLE IF NOT EXISTS matches (
         pdf TEXT,
         image_ref TEXT,
         site TEXT,
@@ -48,10 +43,7 @@ def init_db():
     conn.commit()
     conn.close()
 
-# reset automático (evita todos os erros antigos)
-if "init" not in st.session_state:
-    init_db()
-    st.session_state.init = True
+init_db()
 
 # ---------------- HASH ----------------
 def get_hash(img):
@@ -113,7 +105,7 @@ def download_image(url):
         return None
 
 # ---------------- MATCH ----------------
-def run_check():
+def run_check(date_start=None, date_end=None):
     conn = get_conn()
     cur = conn.cursor()
 
@@ -125,6 +117,15 @@ def run_check():
 
     for (site_url,) in sites:
         for img_url in extract_site_images(site_url):
+
+            # filtro por data (simples: usa data atual)
+            now = datetime.now().date()
+
+            if date_start and now < date_start:
+                continue
+            if date_end and now > date_end:
+                continue
+
             site_img = download_image(img_url)
             if site_img is None:
                 continue
@@ -155,12 +156,21 @@ menu = st.sidebar.selectbox("Menu", ["Upload", "Miniaturas", "Resultados", "Gest
 
 # -------- Upload --------
 if menu == "Upload":
-    st.title("Upload PDFs e Sites")
+    st.title("📥 Upload")
 
     conn = get_conn()
     cur = conn.cursor()
 
-    uploaded_pdfs = st.file_uploader("PDFs", type=["pdf"], accept_multiple_files=True)
+    # mostrar já carregados
+    st.subheader("📂 PDFs já carregados")
+    cur.execute("SELECT name FROM pdfs")
+    st.write([r[0] for r in cur.fetchall()])
+
+    st.subheader("🌐 Sites já carregados")
+    cur.execute("SELECT url FROM sites")
+    st.write([r[0] for r in cur.fetchall()])
+
+    uploaded_pdfs = st.file_uploader("Adicionar PDFs", type=["pdf"], accept_multiple_files=True)
 
     if uploaded_pdfs:
         for pdf_file in uploaded_pdfs:
@@ -176,7 +186,7 @@ if menu == "Upload":
 
         conn.commit()
 
-    sites = st.text_area("Sites (1 por linha)")
+    sites = st.text_area("Adicionar sites (1 por linha)")
 
     if st.button("Guardar sites"):
         for url in sites.split("\n"):
@@ -186,23 +196,21 @@ if menu == "Upload":
         conn.commit()
         st.success("Sites guardados")
 
-    if st.button("Pesquisar agora"):
-        run_check()
+    # 📅 filtro datas
+    st.subheader("📅 Intervalo de pesquisa (opcional)")
+    col1, col2 = st.columns(2)
+    date_start = col1.date_input("Data início", value=None)
+    date_end = col2.date_input("Data fim", value=None)
+
+    if st.button("🔍 Pesquisar agora"):
+        run_check(date_start, date_end)
         st.success("Pesquisa concluída")
-
-    st.subheader("PDFs carregados")
-    cur.execute("SELECT name FROM pdfs")
-    st.write(cur.fetchall())
-
-    st.subheader("Sites carregados")
-    cur.execute("SELECT url FROM sites")
-    st.write(cur.fetchall())
 
     conn.close()
 
 # -------- Miniaturas --------
 elif menu == "Miniaturas":
-    st.title("Miniaturas")
+    st.title("🖼️ Miniaturas")
 
     conn = get_conn()
     cur = conn.cursor()
@@ -221,7 +229,7 @@ elif menu == "Miniaturas":
 
 # -------- Resultados --------
 elif menu == "Resultados":
-    st.title("Resultados")
+    st.title("📊 Resultados")
 
     conn = get_conn()
     cur = conn.cursor()
@@ -229,37 +237,30 @@ elif menu == "Resultados":
     cur.execute("SELECT * FROM matches ORDER BY date DESC")
     rows = cur.fetchall()
 
-    if rows:
-        for r in rows:
-            st.write(r)
-    else:
-        st.write("Sem resultados")
+    for r in rows:
+        st.write(r)
 
     conn.close()
 
 # -------- Gestão --------
 elif menu == "Gestão":
-    st.title("Gestão")
+    st.title("🗑️ Gestão")
 
     conn = get_conn()
     cur = conn.cursor()
 
-    st.subheader("Apagar PDFs")
+    st.subheader("PDFs")
     cur.execute("SELECT name FROM pdfs")
-    pdfs = [r[0] for r in cur.fetchall()]
-
-    for pdf in pdfs:
+    for (pdf,) in cur.fetchall():
         if st.button(f"Apagar {pdf}"):
             cur.execute("DELETE FROM pdfs WHERE name=?", (pdf,))
             cur.execute("DELETE FROM pdf_images WHERE pdf=?", (pdf,))
             conn.commit()
             st.experimental_rerun()
 
-    st.subheader("Apagar Sites")
+    st.subheader("Sites")
     cur.execute("SELECT url FROM sites")
-    sites = [r[0] for r in cur.fetchall()]
-
-    for s in sites:
+    for (s,) in cur.fetchall():
         if st.button(f"Apagar {s}"):
             cur.execute("DELETE FROM sites WHERE url=?", (s,))
             conn.commit()
