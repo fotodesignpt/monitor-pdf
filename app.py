@@ -21,17 +21,23 @@ def init_db():
     conn = get_conn()
     cur = conn.cursor()
 
-    cur.execute("CREATE TABLE IF NOT EXISTS pdfs (name TEXT PRIMARY KEY, data BLOB)")
-    cur.execute("CREATE TABLE IF NOT EXISTS sites (url TEXT PRIMARY KEY)")
+    # apaga tudo e recria corretamente
+    cur.execute("DROP TABLE IF EXISTS pdfs")
+    cur.execute("DROP TABLE IF EXISTS sites")
+    cur.execute("DROP TABLE IF EXISTS pdf_images")
+    cur.execute("DROP TABLE IF EXISTS matches")
 
-    cur.execute("""CREATE TABLE IF NOT EXISTS pdf_images (
+    cur.execute("CREATE TABLE pdfs (name TEXT PRIMARY KEY, data BLOB)")
+    cur.execute("CREATE TABLE sites (url TEXT PRIMARY KEY)")
+
+    cur.execute("""CREATE TABLE pdf_images (
         pdf TEXT,
         ref TEXT PRIMARY KEY,
         hash TEXT,
         image BLOB
     )""")
 
-    cur.execute("""CREATE TABLE IF NOT EXISTS matches (
+    cur.execute("""CREATE TABLE matches (
         pdf TEXT,
         image_ref TEXT,
         site TEXT,
@@ -42,8 +48,6 @@ def init_db():
 
     conn.commit()
     conn.close()
-
-init_db()
 
 # ---------------- HASH ----------------
 def get_hash(img):
