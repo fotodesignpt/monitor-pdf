@@ -181,7 +181,7 @@ if menu == "Upload":
             pdf_bytes = pdf_file.read()
             name = pdf_file.name
 
-            cur.execute("INSERT OR IGNORE INTO pdfs VALUES (?,?)", (name, pdf_bytes))
+            cur.execute("INSERT OR IGNORE INTO pdfs (name, data) VALUES (?,?)", (name, pdf_bytes))
 
             for ref, h, img_bytes in extract_pdf_images(pdf_bytes, name):
                 cur.execute("INSERT OR IGNORE INTO pdf_images VALUES (?,?,?,?)", (name, ref, h, img_bytes))
