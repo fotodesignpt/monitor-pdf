@@ -3,61 +3,68 @@ import fitz
 import requests
 from bs4 import BeautifulSoup
 from datetime import datetime, timedelta
-import sqlite3
+import psycopg2
+import pandas as pd
 from PIL import Image
 import imagehash
 from io import BytesIO
 from urllib.parse import urljoin
-import pandas as pd
 
-DB_FILE = "local.db"
+# ---------------- CONFIG ----------------
+DB_HOST = "localhost"
+DB_NAME = "monitor_pdf"
+DB_USER = "postgres"
+DB_PASS = "your_password"
+DB_PORT = 5432
+
+MAX_PAGES = 50  # profundidade crawler
 
 # ---------------- DB ----------------
 def get_conn():
-    conn = sqlite3.connect(DB_FILE, timeout=30, check_same_thread=False)
-    conn.execute("PRAGMA journal_mode=WAL;")
-    return conn
+    return psycopg2.connect(
+        host=DB_HOST, dbname=DB_NAME,
+        user=DB_USER, password=DB_PASS,
+        port=DB_PORT
+    )
 
 def init_db():
     conn = get_conn()
     cur = conn.cursor()
 
-    try:
-        cur.execute("SELECT name FROM pdfs LIMIT 1")
-    except:
-        cur.execute("DROP TABLE IF EXISTS pdfs")
-        cur.execute("DROP TABLE IF EXISTS sites")
-        cur.execute("DROP TABLE IF EXISTS pdf_images")
-        cur.execute("DROP TABLE IF EXISTS matches")
-        cur.execute("DROP TABLE IF EXISTS system")
+    cur.execute("""CREATE TABLE IF NOT EXISTS pdfs (
+        name TEXT PRIMARY KEY,
+        data BYTEA
+    )""")
 
-        cur.execute("CREATE TABLE pdfs (name TEXT PRIMARY KEY, data BLOB)")
-        cur.execute("CREATE TABLE sites (url TEXT PRIMARY KEY)")
+    cur.execute("""CREATE TABLE IF NOT EXISTS sites (
+        url TEXT PRIMARY KEY
+    )""")
 
-        cur.execute("""CREATE TABLE pdf_images (
-            pdf TEXT,
-            ref TEXT PRIMARY KEY,
-            hash TEXT,
-            image BLOB
-        )""")
+    cur.execute("""CREATE TABLE IF NOT EXISTS pdf_images (
+        pdf TEXT,
+        ref TEXT PRIMARY KEY,
+        hash TEXT,
+        image BYTEA
+    )""")
 
-        cur.execute("""CREATE TABLE matches (
-            pdf TEXT,
-            image_ref TEXT,
-            site TEXT,
-            image_url TEXT,
-            similarity INTEGER,
-            date TEXT
-        )""")
+    cur.execute("""CREATE TABLE IF NOT EXISTS matches (
+        pdf TEXT,
+        image_ref TEXT,
+        site TEXT,
+        image_url TEXT,
+        similarity INTEGER,
+        date TIMESTAMP
+    )""")
 
-        cur.execute("CREATE TABLE system (key TEXT PRIMARY KEY, value TEXT)")
+    cur.execute("""CREATE TABLE IF NOT EXISTS system (
+        key TEXT PRIMARY KEY,
+        value TEXT
+    )""")
 
     conn.commit()
     conn.close()
 
-if "db_checked" not in st.session_state:
-    init_db()
-    st.session_state.db_checked = True
+init_db()
 
 # ---------------- HASH ----------------
 def get_hash(img):
@@ -68,7 +75,7 @@ def get_hash(img):
 
 # ---------------- PDF ----------------
 def extract_pdf_images(pdf_bytes, pdf_name):
-    results = []
+    images = []
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
 
     for i, page in enumerate(doc):
@@ -81,29 +88,28 @@ def extract_pdf_images(pdf_bytes, pdf_name):
                     pix = fitz.Pixmap(fitz.csRGB, pix)
 
                 img_bytes = pix.tobytes("png")
-                img_pil = Image.open(BytesIO(img_bytes))
+                pil = Image.open(BytesIO(img_bytes))
+                h = get_hash(pil)
 
-                h = get_hash(img_pil)
                 ref = f"{pdf_name}_p{i+1}_img{img_index+1}"
 
                 if h:
-                    results.append((ref, h, img_bytes))
+                    images.append((ref, h, img_bytes))
             except:
                 continue
 
-    return results
+    return images
 
 # ---------------- CRAWLER ----------------
 HEADERS = {"User-Agent": "Mozilla/5.0"}
 
-def crawl_site(url, max_pages=25):
+def crawl_site(url):
     visited = set()
     to_visit = [url]
     images = []
 
-    while to_visit and len(visited) < max_pages:
+    while to_visit and len(visited) < MAX_PAGES:
         current = to_visit.pop(0)
-
         if current in visited:
             continue
 
@@ -138,15 +144,18 @@ def download_image(url):
         return None
 
 # ---------------- MATCH ----------------
-def run_check():
+def run_check(selected_sites=None, start_date=None, end_date=None):
     conn = get_conn()
     cur = conn.cursor()
 
     cur.execute("SELECT pdf, ref, hash FROM pdf_images")
     pdf_images = cur.fetchall()
 
-    cur.execute("SELECT url FROM sites")
-    sites = cur.fetchall()
+    if selected_sites:
+        sites = [(s,) for s in selected_sites]
+    else:
+        cur.execute("SELECT url FROM sites")
+        sites = cur.fetchall()
 
     for (site_url,) in sites:
         for img_url in crawl_site(site_url):
@@ -164,11 +173,21 @@ def run_check():
                     diff = imagehash.hex_to_hash(pdf_hash) - imagehash.hex_to_hash(site_hash)
 
                     if diff < 10:
-                        cur.execute("SELECT 1 FROM matches WHERE image_ref=? AND image_url=?", (ref, img_url))
+                        now = datetime.now()
+
+                        if start_date and end_date:
+                            if not (start_date <= now.date() <= end_date):
+                                continue
+
+                        cur.execute("""
+                        SELECT 1 FROM matches WHERE image_ref=%s AND image_url=%s
+                        """, (ref, img_url))
+
                         if not cur.fetchone():
                             cur.execute("""
-                            INSERT INTO matches VALUES (?,?,?,?,?,?)
-                            """, (pdf, ref, site_url, img_url, diff, datetime.now().isoformat()))
+                            INSERT INTO matches (pdf, image_ref, site, image_url, similarity, date)
+                            VALUES (%s,%s,%s,%s,%s,%s)
+                            """, (pdf, ref, site_url, img_url, diff, now))
                 except:
                     continue
 
@@ -186,13 +205,17 @@ def auto_run():
     now = datetime.now()
 
     if row:
-        last_run = datetime.fromisoformat(row[0])
+        last = datetime.fromisoformat(row[0])
     else:
-        last_run = now - timedelta(hours=7)
+        last = now - timedelta(hours=7)
 
-    if (now - last_run).total_seconds() > 21600:
+    if (now - last).total_seconds() > 21600:
         run_check()
-        cur.execute("INSERT OR REPLACE INTO system VALUES ('last_run', ?)", (now.isoformat(),))
+        cur.execute("""
+        INSERT INTO system (key,value)
+        VALUES (%s,%s)
+        ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value
+        """, ("last_run", now.isoformat()))
         conn.commit()
 
     conn.close()
@@ -211,24 +234,19 @@ if menu == "Dashboard":
     cur = conn.cursor()
 
     cur.execute("SELECT COUNT(*) FROM pdfs")
-    pdfs = cur.fetchone()[0]
+    st.metric("PDFs", cur.fetchone()[0])
 
     cur.execute("SELECT COUNT(*) FROM sites")
-    sites = cur.fetchone()[0]
+    st.metric("Sites", cur.fetchone()[0])
 
     cur.execute("SELECT COUNT(*) FROM matches")
-    matches = cur.fetchone()[0]
+    st.metric("Ocorrências", cur.fetchone()[0])
 
-    st.metric("PDFs", pdfs)
-    st.metric("Sites", sites)
-    st.metric("Ocorrências", matches)
+    df = pd.read_sql_query("SELECT date FROM matches", conn)
 
-    cur.execute("SELECT date FROM matches")
-    dates = [d[0][:10] for d in cur.fetchall()]
-
-    if dates:
-        df = pd.Series(dates).value_counts().sort_index()
-        st.line_chart(df)
+    if not df.empty:
+        df["date"] = pd.to_datetime(df["date"]).dt.date
+        st.line_chart(df["date"].value_counts().sort_index())
 
     conn.close()
 
@@ -243,36 +261,61 @@ elif menu == "Upload":
     st.write("PDFs:", [r[0] for r in cur.fetchall()])
 
     cur.execute("SELECT url FROM sites")
-    st.write("Sites:", [r[0] for r in cur.fetchall()])
+    all_sites = [r[0] for r in cur.fetchall()]
+    st.write("Sites:", all_sites)
 
-    uploaded_pdfs = st.file_uploader("Adicionar PDFs", type=["pdf"], accept_multiple_files=True)
+    uploaded = st.file_uploader("Adicionar PDFs", type=["pdf"], accept_multiple_files=True)
 
-    if uploaded_pdfs:
-        for pdf_file in uploaded_pdfs:
-            pdf_bytes = pdf_file.read()
+    if uploaded:
+        for pdf_file in uploaded:
+            data = pdf_file.read()
             name = pdf_file.name
 
-            cur.execute("INSERT OR IGNORE INTO pdfs (name, data) VALUES (?,?)", (name, pdf_bytes))
+            cur.execute("""
+            INSERT INTO pdfs (name,data)
+            VALUES (%s,%s)
+            ON CONFLICT (name) DO NOTHING
+            """, (name, data))
 
-            for ref, h, img_bytes in extract_pdf_images(pdf_bytes, name):
-                cur.execute("INSERT OR IGNORE INTO pdf_images VALUES (?,?,?,?)", (name, ref, h, img_bytes))
+            for ref, h, img in extract_pdf_images(data, name):
+                cur.execute("""
+                INSERT INTO pdf_images (pdf,ref,hash,image)
+                VALUES (%s,%s,%s,%s)
+                ON CONFLICT (ref) DO NOTHING
+                """, (name, ref, h, img))
 
         conn.commit()
-        st.success("PDFs carregados")
+        st.success("PDFs processados com miniaturas")
 
-    sites = st.text_area("Sites")
+    new_sites = st.text_area("Adicionar sites")
 
     if st.button("Guardar sites"):
-        for url in sites.split("\n"):
+        for url in new_sites.split("\n"):
             url = url.strip()
             if url:
-                cur.execute("INSERT OR IGNORE INTO sites VALUES (?)", (url,))
+                cur.execute("""
+                INSERT INTO sites (url)
+                VALUES (%s)
+                ON CONFLICT (url) DO NOTHING
+                """, (url,))
         conn.commit()
         st.success("Sites guardados")
 
-    if st.button("🔍 Pesquisa manual"):
-        run_check()
-        st.success("OK")
+    st.subheader("🔍 Pesquisa")
+
+    selected_sites = st.multiselect("Escolher sites", all_sites)
+
+    col1, col2 = st.columns(2)
+    start = col1.date_input("Data início")
+    end = col2.date_input("Data fim")
+
+    if st.button("Limpar datas"):
+        start = None
+        end = None
+
+    if st.button("🔍 Forçar pesquisa"):
+        run_check(selected_sites if selected_sites else None, start, end)
+        st.success("Pesquisa concluída")
 
     conn.close()
 
@@ -283,12 +326,12 @@ elif menu == "Miniaturas":
     conn = get_conn()
     cur = conn.cursor()
 
-    cur.execute("SELECT ref, image FROM pdf_images")
+    cur.execute("SELECT ref,image FROM pdf_images")
     rows = cur.fetchall()
 
     cols = st.columns(5)
-    for i, (ref, img_bytes) in enumerate(rows):
-        cols[i % 5].image(Image.open(BytesIO(img_bytes)), caption=ref)
+    for i, (ref, img) in enumerate(rows):
+        cols[i % 5].image(Image.open(BytesIO(img)), caption=ref)
 
     conn.close()
 
@@ -297,13 +340,12 @@ elif menu == "Resultados":
     st.title("📊 Resultados")
 
     conn = get_conn()
-    cur = conn.cursor()
 
     df = pd.read_sql_query("SELECT * FROM matches ORDER BY date DESC", conn)
     st.dataframe(df)
 
-    csv = df.to_csv(index=False).encode("utf-8")
-    st.download_button("⬇️ Download CSV", csv, "resultados.csv")
+    if not df.empty:
+        st.download_button("⬇️ CSV", df.to_csv(index=False), "resultados.csv")
 
     conn.close()
 
@@ -317,15 +359,15 @@ elif menu == "Gestão":
     cur.execute("SELECT name FROM pdfs")
     for (pdf,) in cur.fetchall():
         if st.button(f"Apagar {pdf}"):
-            cur.execute("DELETE FROM pdfs WHERE name=?", (pdf,))
-            cur.execute("DELETE FROM pdf_images WHERE pdf=?", (pdf,))
+            cur.execute("DELETE FROM pdfs WHERE name=%s", (pdf,))
+            cur.execute("DELETE FROM pdf_images WHERE pdf=%s", (pdf,))
             conn.commit()
             st.experimental_rerun()
 
     cur.execute("SELECT url FROM sites")
     for (s,) in cur.fetchall():
         if st.button(f"Apagar {s}"):
-            cur.execute("DELETE FROM sites WHERE url=?", (s,))
+            cur.execute("DELETE FROM sites WHERE url=%s", (s,))
             conn.commit()
             st.experimental_rerun()
 
