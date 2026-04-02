@@ -11,7 +11,7 @@ from io import BytesIO
 from urllib.parse import urljoin
 
 DB = "data.db"
-MAX_PAGES = 50
+MAX_PAGES = 150
 
 # ---------------- DB ----------------
 def get_conn():
