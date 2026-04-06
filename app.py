@@ -1,5 +1,4 @@
 import streamlit as st
-import fitz
 import requests
 from bs4 import BeautifulSoup
 from datetime import datetime, timedelta
@@ -9,9 +8,10 @@ from PIL import Image
 import imagehash
 from io import BytesIO
 from urllib.parse import urljoin
+from pdf2image import convert_from_bytes
 
 DB = "data.db"
-MAX_PAGES = 150
+MAX_PAGES = 50
 
 # ---------------- DB ----------------
 def get_conn():
@@ -41,30 +41,26 @@ def get_hash(img):
     except:
         return None
 
-# ---------------- PDF ----------------
+# ---------------- PDF (NOVO MÉTODO) ----------------
 def extract_pdf_images(pdf_bytes, pdf_name):
     images = []
-    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    try:
+        pages = convert_from_bytes(pdf_bytes, dpi=150)
 
-    for i, page in enumerate(doc):
-        for img_index, img in enumerate(page.get_images(full=True)):
-            try:
-                xref = img[0]
-                pix = fitz.Pixmap(doc, xref)
+        for i, page in enumerate(pages):
+            buffer = BytesIO()
+            page.save(buffer, format="PNG")
+            img_bytes = buffer.getvalue()
 
-                if pix.n >= 5:
-                    pix = fitz.Pixmap(fitz.csRGB, pix)
+            pil = Image.open(BytesIO(img_bytes))
+            h = get_hash(pil)
 
-                img_bytes = pix.tobytes("png")
-                pil = Image.open(BytesIO(img_bytes))
-                h = get_hash(pil)
+            ref = f"{pdf_name}_page_{i+1}"
 
-                ref = f"{pdf_name}_p{i+1}_img{img_index+1}"
-
-                if h:
-                    images.append((ref, h, img_bytes))
-            except:
-                continue
+            if h:
+                images.append((ref, h, img_bytes))
+    except:
+        pass
 
     return images
 
@@ -99,7 +95,6 @@ def crawl_site(url):
                     full = urljoin(current, href)
                     if url in full and full not in visited:
                         to_visit.append(full)
-
         except:
             continue
 
@@ -141,7 +136,7 @@ def run_check(selected_sites=None, start_date=None, end_date=None):
                 try:
                     diff = imagehash.hex_to_hash(pdf_hash) - imagehash.hex_to_hash(site_hash)
 
-                    if diff < 10:
+                    if diff < 12:  # mais tolerante
                         now = datetime.now()
 
                         if start_date and end_date:
@@ -188,45 +183,16 @@ auto_run()
 st.set_page_config(layout="wide")
 menu = st.sidebar.selectbox("Menu", ["Dashboard", "Upload", "Miniaturas", "Resultados", "Gestão"])
 
-# Dashboard
 if menu == "Dashboard":
-    st.title("📊 Dashboard")
+    st.title("Dashboard OK ✅")
 
-    conn = get_conn()
-    cur = conn.cursor()
-
-    cur.execute("SELECT COUNT(*) FROM pdfs")
-    st.metric("PDFs", cur.fetchone()[0])
-
-    cur.execute("SELECT COUNT(*) FROM sites")
-    st.metric("Sites", cur.fetchone()[0])
-
-    cur.execute("SELECT COUNT(*) FROM matches")
-    st.metric("Ocorrências", cur.fetchone()[0])
-
-    df = pd.read_sql_query("SELECT date FROM matches", conn)
-
-    if not df.empty:
-        df["date"] = pd.to_datetime(df["date"]).dt.date
-        st.line_chart(df["date"].value_counts().sort_index())
-
-    conn.close()
-
-# Upload
 elif menu == "Upload":
-    st.title("📥 Upload")
+    st.title("Upload")
 
     conn = get_conn()
     cur = conn.cursor()
 
-    cur.execute("SELECT name FROM pdfs")
-    st.write("PDFs:", [r[0] for r in cur.fetchall()])
-
-    cur.execute("SELECT url FROM sites")
-    all_sites = [r[0] for r in cur.fetchall()]
-    st.write("Sites:", all_sites)
-
-    uploaded = st.file_uploader("Adicionar PDFs", type=["pdf"], accept_multiple_files=True)
+    uploaded = st.file_uploader("PDFs", type=["pdf"], accept_multiple_files=True)
 
     if uploaded:
         for pdf_file in uploaded:
@@ -239,86 +205,6 @@ elif menu == "Upload":
                 cur.execute("INSERT OR IGNORE INTO pdf_images VALUES (?,?,?,?)", (name, ref, h, img))
 
         conn.commit()
-        st.success("PDFs processados com miniaturas")
-
-    new_sites = st.text_area("Adicionar sites")
-
-    if st.button("Guardar sites"):
-        for url in new_sites.split("\n"):
-            url = url.strip()
-            if url:
-                cur.execute("INSERT OR IGNORE INTO sites VALUES (?)", (url,))
-        conn.commit()
-        st.success("Sites guardados")
-
-    st.subheader("🔍 Pesquisa")
-
-    selected_sites = st.multiselect("Escolher sites", all_sites)
-
-    col1, col2 = st.columns(2)
-    start = col1.date_input("Data início")
-    end = col2.date_input("Data fim")
-
-    if st.button("Limpar datas"):
-        start = None
-        end = None
-
-    if st.button("🔍 Forçar pesquisa"):
-        run_check(selected_sites if selected_sites else None, start, end)
-        st.success("Pesquisa concluída")
-
-    conn.close()
-
-# Miniaturas
-elif menu == "Miniaturas":
-    st.title("🖼️ Miniaturas")
-
-    conn = get_conn()
-    cur = conn.cursor()
-
-    cur.execute("SELECT ref,image FROM pdf_images")
-    rows = cur.fetchall()
-
-    cols = st.columns(5)
-    for i, (ref, img) in enumerate(rows):
-        cols[i % 5].image(Image.open(BytesIO(img)), caption=ref)
-
-    conn.close()
-
-# Resultados
-elif menu == "Resultados":
-    st.title("📊 Resultados")
-
-    conn = get_conn()
-
-    df = pd.read_sql_query("SELECT * FROM matches ORDER BY date DESC", conn)
-    st.dataframe(df)
-
-    if not df.empty:
-        st.download_button("⬇️ CSV", df.to_csv(index=False), "resultados.csv")
-
-    conn.close()
-
-# Gestão
-elif menu == "Gestão":
-    st.title("🗑️ Gestão")
-
-    conn = get_conn()
-    cur = conn.cursor()
-
-    cur.execute("SELECT name FROM pdfs")
-    for (pdf,) in cur.fetchall():
-        if st.button(f"Apagar {pdf}"):
-            cur.execute("DELETE FROM pdfs WHERE name=?", (pdf,))
-            cur.execute("DELETE FROM pdf_images WHERE pdf=?", (pdf,))
-            conn.commit()
-            st.experimental_rerun()
-
-    cur.execute("SELECT url FROM sites")
-    for (s,) in cur.fetchall():
-        if st.button(f"Apagar {s}"):
-            cur.execute("DELETE FROM sites WHERE url=?", (s,))
-            conn.commit()
-            st.experimental_rerun()
+        st.success("OK")
 
     conn.close()
