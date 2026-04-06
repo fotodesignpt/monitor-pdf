@@ -1,7 +1,7 @@
 streamlit
-PyMuPDF
-requests
-beautifulsoup4
-apscheduler
-Pillow
+pillow
 imagehash
+beautifulsoup4
+requests
+pandas
+pdf2image
