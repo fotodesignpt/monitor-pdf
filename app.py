@@ -10,8 +10,8 @@ from io import BytesIO
 from urllib.parse import urljoin
 from pdf2image import convert_from_bytes
 
-DB = "data.db"
-MAX_PAGES = 150
+DB = "data_v2.db"  # NOVA BASE (corrige problema antigo)
+MAX_PAGES = 80     # MAIS PROFUNDO
 
 # ---------------- DB ----------------
 def get_conn():
@@ -34,9 +34,11 @@ def init_db():
 
 init_db()
 
-# ---------------- HASH ----------------
+# ---------------- HASH MELHORADO ----------------
 def get_hash(img):
     try:
+        img = img.convert("L")  # grayscale
+        img = img.resize((256, 256))  # normaliza
         return str(imagehash.phash(img))
     except:
         return None
@@ -103,11 +105,17 @@ def crawl_site(url):
 def download_image(url):
     try:
         r = requests.get(url, headers=HEADERS, timeout=10)
-        return Image.open(BytesIO(r.content))
+        img = Image.open(BytesIO(r.content))
+
+        # ignora imagens muito pequenas (thumbnails)
+        if img.size[0] < 120 or img.size[1] < 120:
+            return None
+
+        return img
     except:
         return None
 
-# ---------------- MATCH ----------------
+# ---------------- MATCH MELHORADO ----------------
 def run_check(selected_sites=None, start_date=None, end_date=None):
     conn = get_conn()
     cur = conn.cursor()
@@ -136,7 +144,8 @@ def run_check(selected_sites=None, start_date=None, end_date=None):
                 try:
                     diff = imagehash.hex_to_hash(pdf_hash) - imagehash.hex_to_hash(site_hash)
 
-                    if diff < 12:
+                    # MAIS TOLERANTE (ANTES ERA 12)
+                    if diff < 18:
                         now = datetime.now()
 
                         if start_date and end_date:
@@ -181,35 +190,14 @@ auto_run()
 
 # ---------------- UI ----------------
 st.set_page_config(layout="wide")
-menu = st.sidebar.selectbox("Menu", ["Dashboard", "Upload", "Miniaturas", "Resultados", "Gestão"])
-
-# Dashboard
-if menu == "Dashboard":
-    st.title("📊 Dashboard")
-
-    conn = get_conn()
-    cur = conn.cursor()
-
-    st.metric("PDFs", cur.execute("SELECT COUNT(*) FROM pdfs").fetchone()[0])
-    st.metric("Sites", cur.execute("SELECT COUNT(*) FROM sites").fetchone()[0])
-    st.metric("Ocorrências", cur.execute("SELECT COUNT(*) FROM matches").fetchone()[0])
-
-    df = pd.read_sql_query("SELECT date FROM matches", conn)
-    if not df.empty:
-        df["date"] = pd.to_datetime(df["date"]).dt.date
-        st.line_chart(df["date"].value_counts().sort_index())
-
-    conn.close()
+menu = st.sidebar.selectbox("Menu", ["Upload", "Resultados", "Miniaturas"])
 
 # Upload
-elif menu == "Upload":
+if menu == "Upload":
     st.title("📥 Upload")
 
     conn = get_conn()
     cur = conn.cursor()
-
-    cur.execute("SELECT url FROM sites")
-    all_sites = [r[0] for r in cur.fetchall()]
 
     uploaded = st.file_uploader("PDFs", type=["pdf"], accept_multiple_files=True)
 
@@ -224,9 +212,9 @@ elif menu == "Upload":
                 cur.execute("INSERT OR IGNORE INTO pdf_images VALUES (?,?,?,?)", (name, ref, h, img))
 
         conn.commit()
-        st.success("PDFs processados com miniaturas")
+        st.success("PDFs processados")
 
-    sites = st.text_area("Adicionar sites")
+    sites = st.text_area("Sites (1 por linha)")
 
     if st.button("Guardar sites"):
         for url in sites.split("\n"):
@@ -236,22 +224,19 @@ elif menu == "Upload":
         conn.commit()
         st.success("Sites guardados")
 
-    st.subheader("🔍 Pesquisa")
-
-    selected_sites = st.multiselect("Escolher sites (ou vazio = todos)", all_sites)
-
-    col1, col2 = st.columns(2)
-    start = col1.date_input("Data início")
-    end = col2.date_input("Data fim")
-
-    if st.button("Limpar datas"):
-        start = None
-        end = None
-
     if st.button("🔍 Forçar pesquisa"):
-        run_check(selected_sites if selected_sites else None, start, end)
+        run_check()
         st.success("Pesquisa concluída")
 
+    conn.close()
+
+# Resultados
+elif menu == "Resultados":
+    st.title("📊 Resultados")
+
+    conn = get_conn()
+    df = pd.read_sql_query("SELECT * FROM matches ORDER BY date DESC", conn)
+    st.dataframe(df)
     conn.close()
 
 # Miniaturas
@@ -267,41 +252,5 @@ elif menu == "Miniaturas":
     cols = st.columns(5)
     for i, (ref, img) in enumerate(rows):
         cols[i % 5].image(Image.open(BytesIO(img)), caption=ref)
-
-    conn.close()
-
-# Resultados
-elif menu == "Resultados":
-    st.title("📊 Resultados")
-
-    conn = get_conn()
-    df = pd.read_sql_query("SELECT * FROM matches ORDER BY date DESC", conn)
-
-    st.dataframe(df)
-
-    if not df.empty:
-        st.download_button("⬇️ CSV", df.to_csv(index=False), "resultados.csv")
-
-    conn.close()
-
-# Gestão
-elif menu == "Gestão":
-    st.title("🗑️ Gestão")
-
-    conn = get_conn()
-    cur = conn.cursor()
-
-    for (pdf,) in cur.execute("SELECT name FROM pdfs").fetchall():
-        if st.button(f"Apagar {pdf}"):
-            cur.execute("DELETE FROM pdfs WHERE name=?", (pdf,))
-            cur.execute("DELETE FROM pdf_images WHERE pdf=?", (pdf,))
-            conn.commit()
-            st.experimental_rerun()
-
-    for (s,) in cur.execute("SELECT url FROM sites").fetchall():
-        if st.button(f"Apagar {s}"):
-            cur.execute("DELETE FROM sites WHERE url=?", (s,))
-            conn.commit()
-            st.experimental_rerun()
 
     conn.close()
