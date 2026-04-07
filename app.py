@@ -7,7 +7,7 @@ import pandas as pd
 from PIL import Image
 from io import BytesIO
 from urllib.parse import urljoin
-from pdf2image import convert_from_bytes
+import fitz  # PyMuPDF
 from openai import OpenAI
 import base64
 
@@ -53,17 +53,20 @@ def similarity(a, b):
 
 # ---------------- PDF ----------------
 def process_pdf(pdf_bytes, name):
-    pages = convert_from_bytes(pdf_bytes, dpi=120)
-
     results = []
-    for i, page in enumerate(pages):
-        buf = BytesIO()
-        page.save(buf, format="PNG")
-        img_bytes = buf.getvalue()
+    try:
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
 
-        emb = get_embedding(img_bytes)
-        if emb:
-            results.append((f"{name}_p{i}", name, str(emb), img_bytes))
+        for i, page in enumerate(doc):
+            pix = page.get_pixmap()
+            img_bytes = pix.tobytes("png")
+
+            emb = get_embedding(img_bytes)
+            if emb:
+                results.append((f"{name}_p{i}", name, str(emb), img_bytes))
+
+    except:
+        pass
 
     return results
 
