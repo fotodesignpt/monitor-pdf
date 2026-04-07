@@ -5,19 +5,20 @@ from datetime import datetime, timedelta
 import sqlite3
 import pandas as pd
 from PIL import Image
-import imagehash
 from io import BytesIO
 from urllib.parse import urljoin
 from pdf2image import convert_from_bytes
+from openai import OpenAI
+import base64
 
-DB = "data_v2.db"  # NOVA BASE (corrige problema antigo)
-MAX_PAGES = 80     # MAIS PROFUNDO
+client = OpenAI()
+
+DB = "ultimate.db"
+MAX_PAGES = 100
 
 # ---------------- DB ----------------
 def get_conn():
-    conn = sqlite3.connect(DB, check_same_thread=False)
-    conn.execute("PRAGMA journal_mode=WAL;")
-    return conn
+    return sqlite3.connect(DB, check_same_thread=False)
 
 def init_db():
     conn = get_conn()
@@ -25,232 +26,190 @@ def init_db():
 
     cur.execute("CREATE TABLE IF NOT EXISTS pdfs (name TEXT PRIMARY KEY, data BLOB)")
     cur.execute("CREATE TABLE IF NOT EXISTS sites (url TEXT PRIMARY KEY)")
-    cur.execute("CREATE TABLE IF NOT EXISTS pdf_images (pdf TEXT, ref TEXT PRIMARY KEY, hash TEXT, image BLOB)")
-    cur.execute("CREATE TABLE IF NOT EXISTS matches (pdf TEXT, image_ref TEXT, site TEXT, image_url TEXT, similarity INTEGER, date TEXT)")
-    cur.execute("CREATE TABLE IF NOT EXISTS system (key TEXT PRIMARY KEY, value TEXT)")
+    cur.execute("CREATE TABLE IF NOT EXISTS images (ref TEXT PRIMARY KEY, pdf TEXT, embedding TEXT, img BLOB)")
+    cur.execute("CREATE TABLE IF NOT EXISTS matches (ref TEXT, site TEXT, page_url TEXT, image_url TEXT, score REAL, date TEXT)")
 
     conn.commit()
     conn.close()
 
 init_db()
 
-# ---------------- HASH MELHORADO ----------------
-def get_hash(img):
+# ---------------- EMBEDDINGS ----------------
+def get_embedding(img_bytes):
     try:
-        img = img.convert("L")  # grayscale
-        img = img.resize((256, 256))  # normaliza
-        return str(imagehash.phash(img))
+        b64 = base64.b64encode(img_bytes).decode()
+
+        res = client.embeddings.create(
+            model="text-embedding-3-large",
+            input=b64
+        )
+
+        return res.data[0].embedding
     except:
         return None
+
+def similarity(a, b):
+    return sum(x*y for x,y in zip(a,b))
 
 # ---------------- PDF ----------------
-def extract_pdf_images(pdf_bytes, pdf_name):
-    images = []
-    try:
-        pages = convert_from_bytes(pdf_bytes, dpi=150)
+def process_pdf(pdf_bytes, name):
+    pages = convert_from_bytes(pdf_bytes, dpi=120)
 
-        for i, page in enumerate(pages):
-            buffer = BytesIO()
-            page.save(buffer, format="PNG")
-            img_bytes = buffer.getvalue()
+    results = []
+    for i, page in enumerate(pages):
+        buf = BytesIO()
+        page.save(buf, format="PNG")
+        img_bytes = buf.getvalue()
 
-            pil = Image.open(BytesIO(img_bytes))
-            h = get_hash(pil)
+        emb = get_embedding(img_bytes)
+        if emb:
+            results.append((f"{name}_p{i}", name, str(emb), img_bytes))
 
-            ref = f"{pdf_name}_page_{i+1}"
+    return results
 
-            if h:
-                images.append((ref, h, img_bytes))
-    except:
-        pass
+# ---------------- CRAWL ----------------
+HEADERS = {"User-Agent":"Mozilla/5.0"}
 
-    return images
+def crawl(url):
+    visited=set()
+    queue=[url]
+    imgs=[]
 
-# ---------------- CRAWLER ----------------
-HEADERS = {"User-Agent": "Mozilla/5.0"}
-
-def crawl_site(url):
-    visited = set()
-    to_visit = [url]
-    images = []
-
-    while to_visit and len(visited) < MAX_PAGES:
-        current = to_visit.pop(0)
-
-        if current in visited:
+    while queue and len(visited)<MAX_PAGES:
+        u=queue.pop(0)
+        if u in visited:
             continue
-
-        visited.add(current)
+        visited.add(u)
 
         try:
-            r = requests.get(current, headers=HEADERS, timeout=10)
-            soup = BeautifulSoup(r.text, "html.parser")
+            r=requests.get(u,headers=HEADERS,timeout=10)
+            soup=BeautifulSoup(r.text,"html.parser")
 
-            for img in soup.find_all("img"):
-                src = img.get("src")
+            for im in soup.find_all("img"):
+                src=im.get("src")
                 if src:
-                    images.append(urljoin(current, src))
+                    imgs.append((u,urljoin(u,src)))
 
-            for link in soup.find_all("a"):
-                href = link.get("href")
+            for a in soup.find_all("a"):
+                href=a.get("href")
                 if href:
-                    full = urljoin(current, href)
-                    if url in full and full not in visited:
-                        to_visit.append(full)
+                    full=urljoin(u,href)
+                    if url in full:
+                        queue.append(full)
         except:
-            continue
+            pass
 
-    return list(set(images))
+    return imgs
 
-def download_image(url):
+def download(url):
     try:
-        r = requests.get(url, headers=HEADERS, timeout=10)
-        img = Image.open(BytesIO(r.content))
-
-        # ignora imagens muito pequenas (thumbnails)
-        if img.size[0] < 120 or img.size[1] < 120:
-            return None
-
-        return img
+        r=requests.get(url,headers=HEADERS,timeout=10)
+        return r.content
     except:
         return None
 
-# ---------------- MATCH MELHORADO ----------------
-def run_check(selected_sites=None, start_date=None, end_date=None):
-    conn = get_conn()
-    cur = conn.cursor()
+# ---------------- MATCH ----------------
+def run(selected_sites=None, start=None, end=None):
+    conn=get_conn()
+    cur=conn.cursor()
 
-    cur.execute("SELECT pdf, ref, hash FROM pdf_images")
-    pdf_images = cur.fetchall()
+    cur.execute("SELECT ref,embedding FROM images")
+    pdf_imgs=cur.fetchall()
 
     if selected_sites:
-        sites = [(s,) for s in selected_sites]
+        sites=[(s,) for s in selected_sites]
     else:
         cur.execute("SELECT url FROM sites")
-        sites = cur.fetchall()
+        sites=cur.fetchall()
 
-    for (site_url,) in sites:
-        for img_url in crawl_site(site_url):
-
-            site_img = download_image(img_url)
-            if site_img is None:
+    for (site,) in sites:
+        for page,img in crawl(site):
+            data=download(img)
+            if not data:
                 continue
 
-            site_hash = get_hash(site_img)
-            if not site_hash:
+            emb2=get_embedding(data)
+            if not emb2:
                 continue
 
-            for pdf, ref, pdf_hash in pdf_images:
-                try:
-                    diff = imagehash.hex_to_hash(pdf_hash) - imagehash.hex_to_hash(site_hash)
+            for ref,emb in pdf_imgs:
+                emb1=eval(emb)
+                score=similarity(emb1,emb2)
 
-                    # MAIS TOLERANTE (ANTES ERA 12)
-                    if diff < 18:
-                        now = datetime.now()
+                if score>0.85:
+                    now=datetime.now()
 
-                        if start_date and end_date:
-                            if not (start_date <= now.date() <= end_date):
-                                continue
+                    if start and end:
+                        if not(start<=now.date()<=end):
+                            continue
 
-                        cur.execute("SELECT 1 FROM matches WHERE image_ref=? AND image_url=?", (ref, img_url))
-
-                        if not cur.fetchone():
-                            cur.execute("""
-                            INSERT INTO matches VALUES (?,?,?,?,?,?)
-                            """, (pdf, ref, site_url, img_url, diff, now.isoformat()))
-                except:
-                    continue
+                    cur.execute("""
+                    INSERT INTO matches VALUES (?,?,?,?,?,?)
+                    """,(ref,site,page,img,score,now.isoformat()))
 
     conn.commit()
     conn.close()
 
-# ---------------- AUTO RUN ----------------
-def auto_run():
-    conn = get_conn()
-    cur = conn.cursor()
+# ---------------- AUTO ----------------
+def auto():
+    if "last" not in st.session_state:
+        st.session_state.last=datetime.now()-timedelta(hours=7)
 
-    cur.execute("SELECT value FROM system WHERE key='last_run'")
-    row = cur.fetchone()
+    if (datetime.now()-st.session_state.last).seconds>21600:
+        run()
+        st.session_state.last=datetime.now()
 
-    now = datetime.now()
-
-    if row:
-        last = datetime.fromisoformat(row[0])
-    else:
-        last = now - timedelta(hours=7)
-
-    if (now - last).total_seconds() > 21600:
-        run_check()
-        cur.execute("INSERT OR REPLACE INTO system VALUES ('last_run',?)", (now.isoformat(),))
-        conn.commit()
-
-    conn.close()
-
-auto_run()
+auto()
 
 # ---------------- UI ----------------
 st.set_page_config(layout="wide")
-menu = st.sidebar.selectbox("Menu", ["Upload", "Resultados", "Miniaturas"])
+menu=st.sidebar.radio("Menu",["Upload","Miniaturas","Resultados"])
 
-# Upload
-if menu == "Upload":
-    st.title("📥 Upload")
+# UPLOAD
+if menu=="Upload":
+    st.title("Upload")
 
-    conn = get_conn()
-    cur = conn.cursor()
+    conn=get_conn()
+    cur=conn.cursor()
 
-    uploaded = st.file_uploader("PDFs", type=["pdf"], accept_multiple_files=True)
+    files=st.file_uploader("PDFs",type=["pdf"],accept_multiple_files=True)
 
-    if uploaded:
-        for pdf_file in uploaded:
-            data = pdf_file.read()
-            name = pdf_file.name
+    if files:
+        for f in files:
+            data=f.read()
+            cur.execute("INSERT OR IGNORE INTO pdfs VALUES (?,?)",(f.name,data))
 
-            cur.execute("INSERT OR IGNORE INTO pdfs VALUES (?,?)", (name, data))
-
-            for ref, h, img in extract_pdf_images(data, name):
-                cur.execute("INSERT OR IGNORE INTO pdf_images VALUES (?,?,?,?)", (name, ref, h, img))
+            for row in process_pdf(data,f.name):
+                cur.execute("INSERT OR IGNORE INTO images VALUES (?,?,?,?)",row)
 
         conn.commit()
-        st.success("PDFs processados")
+        st.success("PDFs guardados")
 
-    sites = st.text_area("Sites (1 por linha)")
+    urls=st.text_area("Sites")
 
     if st.button("Guardar sites"):
-        for url in sites.split("\n"):
-            url = url.strip()
-            if url:
-                cur.execute("INSERT OR IGNORE INTO sites VALUES (?)", (url,))
+        for u in urls.split("\n"):
+            if u.strip():
+                cur.execute("INSERT OR IGNORE INTO sites VALUES (?)",(u.strip(),))
         conn.commit()
-        st.success("Sites guardados")
 
-    if st.button("🔍 Forçar pesquisa"):
-        run_check()
-        st.success("Pesquisa concluída")
+    if st.button("Forçar pesquisa"):
+        run()
+        st.success("Feito")
 
-    conn.close()
+# MINIATURAS
+elif menu=="Miniaturas":
+    conn=get_conn()
+    cur=conn.cursor()
+    cur.execute("SELECT ref,img FROM images")
+    rows=cur.fetchall()
 
-# Resultados
-elif menu == "Resultados":
-    st.title("📊 Resultados")
+    cols=st.columns(5)
+    for i,(r,img) in enumerate(rows):
+        cols[i%5].image(Image.open(BytesIO(img)),caption=r)
 
-    conn = get_conn()
-    df = pd.read_sql_query("SELECT * FROM matches ORDER BY date DESC", conn)
+# RESULTADOS
+elif menu=="Resultados":
+    conn=get_conn()
+    df=pd.read_sql_query("SELECT * FROM matches ORDER BY date DESC",conn)
     st.dataframe(df)
-    conn.close()
-
-# Miniaturas
-elif menu == "Miniaturas":
-    st.title("🖼️ Miniaturas")
-
-    conn = get_conn()
-    cur = conn.cursor()
-
-    cur.execute("SELECT ref,image FROM pdf_images")
-    rows = cur.fetchall()
-
-    cols = st.columns(5)
-    for i, (ref, img) in enumerate(rows):
-        cols[i % 5].image(Image.open(BytesIO(img)), caption=ref)
-
-    conn.close()
