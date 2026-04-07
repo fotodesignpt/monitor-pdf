@@ -12,27 +12,44 @@ import openai
 import base64
 import os
 
-DB = "final.db"
+DB = "safe.db"
 
-# ---------------- DB ----------------
+# -------- RESET TOTAL AUTOMÁTICO --------
+def reset_db():
+    if os.path.exists(DB):
+        os.remove(DB)
+
 def get_conn():
     return sqlite3.connect(DB, check_same_thread=False)
 
 def init_db():
-    conn = get_conn()
-    cur = conn.cursor()
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
 
-    cur.execute("CREATE TABLE IF NOT EXISTS pdfs (name TEXT PRIMARY KEY, data BLOB)")
-    cur.execute("CREATE TABLE IF NOT EXISTS sites (url TEXT PRIMARY KEY)")
-    cur.execute("CREATE TABLE IF NOT EXISTS images (ref TEXT PRIMARY KEY, pdf TEXT, embedding TEXT, img BLOB)")
-    cur.execute("CREATE TABLE IF NOT EXISTS matches (ref TEXT, site TEXT, page_url TEXT, image_url TEXT, score REAL, date TEXT)")
+        cur.execute("CREATE TABLE pdfs (name TEXT PRIMARY KEY, data BLOB)")
+        cur.execute("CREATE TABLE sites (url TEXT PRIMARY KEY)")
+        cur.execute("CREATE TABLE images (ref TEXT PRIMARY KEY, pdf TEXT, embedding TEXT, img BLOB)")
+        cur.execute("CREATE TABLE matches (ref TEXT, site TEXT, page_url TEXT, image_url TEXT, score REAL, date TEXT)")
 
-    conn.commit()
-    conn.close()
+        conn.commit()
+        conn.close()
+    except:
+        reset_db()
+        conn = get_conn()
+        cur = conn.cursor()
+
+        cur.execute("CREATE TABLE pdfs (name TEXT PRIMARY KEY, data BLOB)")
+        cur.execute("CREATE TABLE sites (url TEXT PRIMARY KEY)")
+        cur.execute("CREATE TABLE images (ref TEXT PRIMARY KEY, pdf TEXT, embedding TEXT, img BLOB)")
+        cur.execute("CREATE TABLE matches (ref TEXT, site TEXT, page_url TEXT, image_url TEXT, score REAL, date TEXT)")
+
+        conn.commit()
+        conn.close()
 
 init_db()
 
-# ---------------- EMBEDDING ----------------
+# -------- EMBEDDING --------
 def get_embedding(img_bytes):
     try:
         b64 = base64.b64encode(img_bytes).decode()
@@ -47,22 +64,25 @@ def get_embedding(img_bytes):
 def similarity(a, b):
     return sum(x*y for x,y in zip(a,b))
 
-# ---------------- PDF ----------------
+# -------- PDF --------
 def process_pdf(pdf_bytes, name):
     results = []
-    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    try:
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
 
-    for i, page in enumerate(doc):
-        pix = page.get_pixmap()
-        img_bytes = pix.tobytes("png")
+        for i, page in enumerate(doc):
+            pix = page.get_pixmap()
+            img_bytes = pix.tobytes("png")
 
-        emb = get_embedding(img_bytes)
-        if emb:
-            results.append((f"{name}_p{i}", name, str(emb), img_bytes))
+            emb = get_embedding(img_bytes)
+            if emb:
+                results.append((f"{name}_p{i}", name, str(emb), img_bytes))
+    except:
+        pass
 
     return results
 
-# ---------------- CRAWLER ----------------
+# -------- CRAWLER --------
 HEADERS = {"User-Agent": "Mozilla/5.0"}
 
 def crawl(url):
@@ -103,7 +123,7 @@ def download(url):
     except:
         return None
 
-# ---------------- MATCH ----------------
+# -------- MATCH --------
 def run(selected_sites=None, start=None, end=None):
     conn=get_conn()
     cur=conn.cursor()
@@ -140,29 +160,19 @@ def run(selected_sites=None, start=None, end=None):
 
                     cur.execute("SELECT 1 FROM matches WHERE ref=? AND image_url=?", (ref,img))
                     if not cur.fetchone():
-                        cur.execute("""
-                        INSERT INTO matches VALUES (?,?,?,?,?,?)
-                        """,(ref,site,page,img,score,now.isoformat()))
+                        cur.execute(
+                            "INSERT INTO matches VALUES (?,?,?,?,?,?)",
+                            (ref,site,page,img,score,now.isoformat())
+                        )
 
     conn.commit()
     conn.close()
 
-# ---------------- AUTO 4x DIA ----------------
-def auto():
-    if "last_run" not in st.session_state:
-        st.session_state.last_run=datetime.now()-timedelta(hours=7)
-
-    if (datetime.now()-st.session_state.last_run).seconds>21600:
-        run()
-        st.session_state.last_run=datetime.now()
-
-auto()
-
-# ---------------- UI ----------------
+# -------- UI --------
 st.set_page_config(layout="wide")
 menu=st.sidebar.radio("Menu",["Upload","Miniaturas","Resultados"])
 
-# ---------------- UPLOAD ----------------
+# UPLOAD
 if menu=="Upload":
     st.title("Upload")
 
@@ -174,7 +184,6 @@ if menu=="Upload":
     if files:
         for f in files:
             data=f.read()
-
             cur.execute("INSERT OR IGNORE INTO pdfs VALUES (?,?)",(f.name,data))
 
             for row in process_pdf(data,f.name):
@@ -195,8 +204,8 @@ if menu=="Upload":
 
     col1,col2,col3=st.columns(3)
 
-    start=col1.date_input("Data início",value=None)
-    end=col2.date_input("Data fim",value=None)
+    start=col1.date_input("Data início")
+    end=col2.date_input("Data fim")
 
     if col3.button("Limpar datas"):
         start=None
@@ -211,7 +220,7 @@ if menu=="Upload":
         run(selected,start,end)
         st.success("Pesquisa concluída")
 
-# ---------------- MINIATURAS ----------------
+# MINIATURAS
 elif menu=="Miniaturas":
     conn=get_conn()
     cur=conn.cursor()
@@ -222,7 +231,7 @@ elif menu=="Miniaturas":
     for i,(r,img) in enumerate(rows):
         cols[i%5].image(Image.open(BytesIO(img)),caption=r)
 
-# ---------------- RESULTADOS ----------------
+# RESULTADOS
 elif menu=="Resultados":
     conn=get_conn()
     df=pd.read_sql_query("SELECT * FROM matches ORDER BY date DESC",conn)
