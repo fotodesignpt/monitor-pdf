@@ -41,7 +41,7 @@ def get_hash(img):
     except:
         return None
 
-# ---------------- PDF (NOVO MÉTODO) ----------------
+# ---------------- PDF ----------------
 def extract_pdf_images(pdf_bytes, pdf_name):
     images = []
     try:
@@ -136,7 +136,7 @@ def run_check(selected_sites=None, start_date=None, end_date=None):
                 try:
                     diff = imagehash.hex_to_hash(pdf_hash) - imagehash.hex_to_hash(site_hash)
 
-                    if diff < 12:  # mais tolerante
+                    if diff < 12:
                         now = datetime.now()
 
                         if start_date and end_date:
@@ -183,14 +183,33 @@ auto_run()
 st.set_page_config(layout="wide")
 menu = st.sidebar.selectbox("Menu", ["Dashboard", "Upload", "Miniaturas", "Resultados", "Gestão"])
 
+# Dashboard
 if menu == "Dashboard":
-    st.title("Dashboard OK ✅")
-
-elif menu == "Upload":
-    st.title("Upload")
+    st.title("📊 Dashboard")
 
     conn = get_conn()
     cur = conn.cursor()
+
+    st.metric("PDFs", cur.execute("SELECT COUNT(*) FROM pdfs").fetchone()[0])
+    st.metric("Sites", cur.execute("SELECT COUNT(*) FROM sites").fetchone()[0])
+    st.metric("Ocorrências", cur.execute("SELECT COUNT(*) FROM matches").fetchone()[0])
+
+    df = pd.read_sql_query("SELECT date FROM matches", conn)
+    if not df.empty:
+        df["date"] = pd.to_datetime(df["date"]).dt.date
+        st.line_chart(df["date"].value_counts().sort_index())
+
+    conn.close()
+
+# Upload
+elif menu == "Upload":
+    st.title("📥 Upload")
+
+    conn = get_conn()
+    cur = conn.cursor()
+
+    cur.execute("SELECT url FROM sites")
+    all_sites = [r[0] for r in cur.fetchall()]
 
     uploaded = st.file_uploader("PDFs", type=["pdf"], accept_multiple_files=True)
 
@@ -205,6 +224,84 @@ elif menu == "Upload":
                 cur.execute("INSERT OR IGNORE INTO pdf_images VALUES (?,?,?,?)", (name, ref, h, img))
 
         conn.commit()
-        st.success("OK")
+        st.success("PDFs processados com miniaturas")
+
+    sites = st.text_area("Adicionar sites")
+
+    if st.button("Guardar sites"):
+        for url in sites.split("\n"):
+            url = url.strip()
+            if url:
+                cur.execute("INSERT OR IGNORE INTO sites VALUES (?)", (url,))
+        conn.commit()
+        st.success("Sites guardados")
+
+    st.subheader("🔍 Pesquisa")
+
+    selected_sites = st.multiselect("Escolher sites (ou vazio = todos)", all_sites)
+
+    col1, col2 = st.columns(2)
+    start = col1.date_input("Data início")
+    end = col2.date_input("Data fim")
+
+    if st.button("Limpar datas"):
+        start = None
+        end = None
+
+    if st.button("🔍 Forçar pesquisa"):
+        run_check(selected_sites if selected_sites else None, start, end)
+        st.success("Pesquisa concluída")
+
+    conn.close()
+
+# Miniaturas
+elif menu == "Miniaturas":
+    st.title("🖼️ Miniaturas")
+
+    conn = get_conn()
+    cur = conn.cursor()
+
+    cur.execute("SELECT ref,image FROM pdf_images")
+    rows = cur.fetchall()
+
+    cols = st.columns(5)
+    for i, (ref, img) in enumerate(rows):
+        cols[i % 5].image(Image.open(BytesIO(img)), caption=ref)
+
+    conn.close()
+
+# Resultados
+elif menu == "Resultados":
+    st.title("📊 Resultados")
+
+    conn = get_conn()
+    df = pd.read_sql_query("SELECT * FROM matches ORDER BY date DESC", conn)
+
+    st.dataframe(df)
+
+    if not df.empty:
+        st.download_button("⬇️ CSV", df.to_csv(index=False), "resultados.csv")
+
+    conn.close()
+
+# Gestão
+elif menu == "Gestão":
+    st.title("🗑️ Gestão")
+
+    conn = get_conn()
+    cur = conn.cursor()
+
+    for (pdf,) in cur.execute("SELECT name FROM pdfs").fetchall():
+        if st.button(f"Apagar {pdf}"):
+            cur.execute("DELETE FROM pdfs WHERE name=?", (pdf,))
+            cur.execute("DELETE FROM pdf_images WHERE pdf=?", (pdf,))
+            conn.commit()
+            st.experimental_rerun()
+
+    for (s,) in cur.execute("SELECT url FROM sites").fetchall():
+        if st.button(f"Apagar {s}"):
+            cur.execute("DELETE FROM sites WHERE url=?", (s,))
+            conn.commit()
+            st.experimental_rerun()
 
     conn.close()
