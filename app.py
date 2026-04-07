@@ -1,7 +1,7 @@
 import streamlit as st
 import requests
 from bs4 import BeautifulSoup
-from datetime import datetime, timedelta
+from datetime import datetime
 import sqlite3
 import pandas as pd
 from PIL import Image
@@ -12,44 +12,27 @@ import openai
 import base64
 import os
 
-DB = "safe.db"
+DB = "final_pro.db"
 
-# -------- RESET TOTAL AUTOMÁTICO --------
-def reset_db():
-    if os.path.exists(DB):
-        os.remove(DB)
-
+# ---------------- DB ----------------
 def get_conn():
     return sqlite3.connect(DB, check_same_thread=False)
 
 def init_db():
-    try:
-        conn = get_conn()
-        cur = conn.cursor()
+    conn = get_conn()
+    cur = conn.cursor()
 
-        cur.execute("CREATE TABLE pdfs (name TEXT PRIMARY KEY, data BLOB)")
-        cur.execute("CREATE TABLE sites (url TEXT PRIMARY KEY)")
-        cur.execute("CREATE TABLE images (ref TEXT PRIMARY KEY, pdf TEXT, embedding TEXT, img BLOB)")
-        cur.execute("CREATE TABLE matches (ref TEXT, site TEXT, page_url TEXT, image_url TEXT, score REAL, date TEXT)")
+    cur.execute("CREATE TABLE IF NOT EXISTS pdfs (name TEXT PRIMARY KEY, data BLOB)")
+    cur.execute("CREATE TABLE IF NOT EXISTS sites (url TEXT PRIMARY KEY)")
+    cur.execute("CREATE TABLE IF NOT EXISTS images (ref TEXT PRIMARY KEY, pdf TEXT, embedding TEXT, img BLOB)")
+    cur.execute("CREATE TABLE IF NOT EXISTS matches (ref TEXT, site TEXT, page_url TEXT, image_url TEXT, score REAL, date TEXT)")
 
-        conn.commit()
-        conn.close()
-    except:
-        reset_db()
-        conn = get_conn()
-        cur = conn.cursor()
-
-        cur.execute("CREATE TABLE pdfs (name TEXT PRIMARY KEY, data BLOB)")
-        cur.execute("CREATE TABLE sites (url TEXT PRIMARY KEY)")
-        cur.execute("CREATE TABLE images (ref TEXT PRIMARY KEY, pdf TEXT, embedding TEXT, img BLOB)")
-        cur.execute("CREATE TABLE matches (ref TEXT, site TEXT, page_url TEXT, image_url TEXT, score REAL, date TEXT)")
-
-        conn.commit()
-        conn.close()
+    conn.commit()
+    conn.close()
 
 init_db()
 
-# -------- EMBEDDING --------
+# ---------------- EMBEDDING ----------------
 def get_embedding(img_bytes):
     try:
         b64 = base64.b64encode(img_bytes).decode()
@@ -58,13 +41,14 @@ def get_embedding(img_bytes):
             input=b64
         )
         return res["data"][0]["embedding"]
-    except:
+    except Exception as e:
+        print("ERRO EMBEDDING:", e)
         return None
 
 def similarity(a, b):
     return sum(x*y for x,y in zip(a,b))
 
-# -------- PDF --------
+# ---------------- PDF ----------------
 def process_pdf(pdf_bytes, name):
     results = []
     try:
@@ -75,14 +59,18 @@ def process_pdf(pdf_bytes, name):
             img_bytes = pix.tobytes("png")
 
             emb = get_embedding(img_bytes)
+
             if emb:
                 results.append((f"{name}_p{i}", name, str(emb), img_bytes))
-    except:
-        pass
+
+        st.success(f"{name}: {len(results)} imagens extraídas")
+
+    except Exception as e:
+        st.error(f"Erro no PDF {name}: {e}")
 
     return results
 
-# -------- CRAWLER --------
+# ---------------- CRAWLER ----------------
 HEADERS = {"User-Agent": "Mozilla/5.0"}
 
 def crawl(url):
@@ -90,7 +78,7 @@ def crawl(url):
     queue=[url]
     imgs=[]
 
-    while queue and len(visited)<100:
+    while queue and len(visited)<50:
         u=queue.pop(0)
         if u in visited:
             continue
@@ -123,19 +111,16 @@ def download(url):
     except:
         return None
 
-# -------- MATCH --------
-def run(selected_sites=None, start=None, end=None):
+# ---------------- MATCH ----------------
+def run():
     conn=get_conn()
     cur=conn.cursor()
 
     cur.execute("SELECT ref,embedding FROM images")
     pdf_imgs=cur.fetchall()
 
-    if selected_sites:
-        sites=[(s,) for s in selected_sites]
-    else:
-        cur.execute("SELECT url FROM sites")
-        sites=cur.fetchall()
+    cur.execute("SELECT url FROM sites")
+    sites=cur.fetchall()
 
     for (site,) in sites:
         for page,img in crawl(site):
@@ -152,45 +137,42 @@ def run(selected_sites=None, start=None, end=None):
                 score=similarity(emb1,emb2)
 
                 if score>0.85:
-                    now=datetime.now()
-
-                    if start and end:
-                        if not(start<=now.date()<=end):
-                            continue
-
                     cur.execute("SELECT 1 FROM matches WHERE ref=? AND image_url=?", (ref,img))
                     if not cur.fetchone():
                         cur.execute(
                             "INSERT INTO matches VALUES (?,?,?,?,?,?)",
-                            (ref,site,page,img,score,now.isoformat())
+                            (ref,site,page,img,score,datetime.now().isoformat())
                         )
 
     conn.commit()
     conn.close()
+    st.success("Pesquisa concluída")
 
-# -------- UI --------
+# ---------------- UI ----------------
 st.set_page_config(layout="wide")
-menu=st.sidebar.radio("Menu",["Upload","Miniaturas","Resultados"])
+menu=st.sidebar.radio("Menu",["Upload","Controlo","Miniaturas","Resultados"])
 
-# UPLOAD
+# ---------------- UPLOAD ----------------
 if menu=="Upload":
-    st.title("Upload")
+    st.title("Upload PDFs")
 
     conn=get_conn()
     cur=conn.cursor()
 
-    files=st.file_uploader("PDFs",type=["pdf"],accept_multiple_files=True)
+    files=st.file_uploader("Carregar PDFs", type=["pdf"], accept_multiple_files=True)
 
     if files:
         for f in files:
             data=f.read()
             cur.execute("INSERT OR IGNORE INTO pdfs VALUES (?,?)",(f.name,data))
 
-            for row in process_pdf(data,f.name):
+            rows = process_pdf(data,f.name)
+
+            for row in rows:
                 cur.execute("INSERT OR IGNORE INTO images VALUES (?,?,?,?)",row)
 
         conn.commit()
-        st.success("PDFs guardados")
+        st.success("Upload completo")
 
     urls=st.text_area("Sites (1 por linha)")
 
@@ -199,40 +181,62 @@ if menu=="Upload":
             if u.strip():
                 cur.execute("INSERT OR IGNORE INTO sites VALUES (?)",(u.strip(),))
         conn.commit()
+        st.success("Sites guardados")
 
-    st.subheader("Filtro de datas")
+    if st.button("🔍 Forçar pesquisa"):
+        run()
 
-    col1,col2,col3=st.columns(3)
+# ---------------- CONTROLO ----------------
+elif menu=="Controlo":
+    st.title("Controlo do sistema")
 
-    start=col1.date_input("Data início")
-    end=col2.date_input("Data fim")
+    conn=get_conn()
+    cur=conn.cursor()
 
-    if col3.button("Limpar datas"):
-        start=None
-        end=None
+    st.subheader("PDFs carregados")
+    pdfs=pd.read_sql_query("SELECT name FROM pdfs",conn)
+    st.dataframe(pdfs)
 
-    cur.execute("SELECT url FROM sites")
-    all_sites=[s[0] for s in cur.fetchall()]
+    if st.button("Apagar PDFs"):
+        cur.execute("DELETE FROM pdfs")
+        cur.execute("DELETE FROM images")
+        conn.commit()
+        st.success("PDFs apagados")
 
-    selected=st.multiselect("Escolher sites",all_sites)
+    st.subheader("Sites")
+    sites=pd.read_sql_query("SELECT url FROM sites",conn)
+    st.dataframe(sites)
 
-    if st.button("Forçar pesquisa"):
-        run(selected,start,end)
-        st.success("Pesquisa concluída")
+    if st.button("Apagar sites"):
+        cur.execute("DELETE FROM sites")
+        conn.commit()
+        st.success("Sites apagados")
 
-# MINIATURAS
+    if st.button("Limpar resultados"):
+        cur.execute("DELETE FROM matches")
+        conn.commit()
+        st.success("Resultados apagados")
+
+# ---------------- MINIATURAS ----------------
 elif menu=="Miniaturas":
     conn=get_conn()
     cur=conn.cursor()
     cur.execute("SELECT ref,img FROM images")
     rows=cur.fetchall()
 
+    if not rows:
+        st.warning("Sem miniaturas ainda — carrega PDFs")
+
     cols=st.columns(5)
     for i,(r,img) in enumerate(rows):
         cols[i%5].image(Image.open(BytesIO(img)),caption=r)
 
-# RESULTADOS
+# ---------------- RESULTADOS ----------------
 elif menu=="Resultados":
     conn=get_conn()
     df=pd.read_sql_query("SELECT * FROM matches ORDER BY date DESC",conn)
+
+    if df.empty:
+        st.warning("Sem resultados ainda")
+
     st.dataframe(df)
