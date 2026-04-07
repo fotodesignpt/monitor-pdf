@@ -1,7 +1,7 @@
 streamlit
-pillow
-imagehash
-beautifulsoup4
 requests
+beautifulsoup4
 pandas
+Pillow
 pdf2image
+openai
