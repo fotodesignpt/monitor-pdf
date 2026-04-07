@@ -11,7 +11,7 @@ from urllib.parse import urljoin
 from pdf2image import convert_from_bytes
 
 DB = "data.db"
-MAX_PAGES = 50
+MAX_PAGES = 150
 
 # ---------------- DB ----------------
 def get_conn():
