@@ -3,5 +3,5 @@ requests
 beautifulsoup4
 pandas
 Pillow
-pdf2image
+pymupdf
 openai
