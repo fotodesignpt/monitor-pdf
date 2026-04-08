@@ -22,20 +22,8 @@ def init_db():
 
     cur.execute("CREATE TABLE IF NOT EXISTS pdfs (name TEXT PRIMARY KEY, data BLOB)")
     cur.execute("CREATE TABLE IF NOT EXISTS sites (url TEXT PRIMARY KEY)")
-    cur.execute("""CREATE TABLE IF NOT EXISTS images (
-        ref TEXT PRIMARY KEY,
-        pdf TEXT,
-        embedding TEXT,
-        img BLOB
-    )""")
-    cur.execute("""CREATE TABLE IF NOT EXISTS matches (
-        ref TEXT,
-        site TEXT,
-        page_url TEXT,
-        image_url TEXT,
-        score REAL,
-        date TEXT
-    )""")
+    cur.execute("CREATE TABLE IF NOT EXISTS images (ref TEXT PRIMARY KEY, pdf TEXT, embedding TEXT, img BLOB)")
+    cur.execute("CREATE TABLE IF NOT EXISTS matches (ref TEXT, site TEXT, page_url TEXT, image_url TEXT, score REAL, date TEXT)")
 
     conn.commit()
     conn.close()
@@ -57,6 +45,24 @@ def get_embedding(img_bytes):
 def similarity(a, b):
     return sum(x*y for x,y in zip(a,b))
 
+# -------- EXTRAIR DATA DA PÁGINA --------
+def extract_date(soup):
+    try:
+        t = soup.find("time")
+        if t and t.get("datetime"):
+            return datetime.fromisoformat(t.get("datetime"))
+    except:
+        pass
+
+    try:
+        meta = soup.find("meta", {"property": "article:published_time"})
+        if meta:
+            return datetime.fromisoformat(meta.get("content"))
+    except:
+        pass
+
+    return None
+
 # -------- PDF --------
 def process_pdf(pdf_bytes, name):
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
@@ -72,8 +78,8 @@ def process_pdf(pdf_bytes, name):
 
     return out
 
-# -------- CRAWLER PROFUNDO --------
-def crawl(site):
+# -------- CRAWL COM FILTRO DATA --------
+def crawl(site, start_date, end_date):
     visited=set()
     queue=[site]
     imgs=[]
@@ -88,6 +94,14 @@ def crawl(site):
             r=requests.get(url,timeout=10)
             soup=BeautifulSoup(r.text,"html.parser")
 
+            page_date = extract_date(soup)
+
+            if start_date and end_date:
+                if not page_date:
+                    continue
+                if not (start_date <= page_date.date() <= end_date):
+                    continue
+
             for im in soup.find_all("img"):
                 src=im.get("src")
                 if src:
@@ -99,6 +113,7 @@ def crawl(site):
                     full=urljoin(url,href)
                     if site in full:
                         queue.append(full)
+
         except:
             pass
 
@@ -111,7 +126,7 @@ def download(url):
         return None
 
 # -------- SEARCH --------
-def run(selected_sites):
+def run(selected_sites, start_date, end_date):
     conn=get_conn()
     cur=conn.cursor()
 
@@ -119,7 +134,7 @@ def run(selected_sites):
     pdfs=cur.fetchall()
 
     for site in selected_sites:
-        for page,img in crawl(site):
+        for page,img in crawl(site, start_date, end_date):
             data=download(img)
             if not data:
                 continue
@@ -174,8 +189,16 @@ if menu=="Upload":
     sites=pd.read_sql_query("SELECT url FROM sites",conn)
     selected=st.multiselect("Escolher sites", sites["url"])
 
+    st.subheader("Intervalo de datas da pesquisa")
+    start=st.date_input("Data início", value=None)
+    end=st.date_input("Data fim", value=None)
+
+    if st.button("Limpar datas"):
+        start=None
+        end=None
+
     if st.button("🔍 Pesquisar agora"):
-        run(selected)
+        run(selected, start, end)
 
 # -------- CONTROLO --------
 elif menu=="Controlo":
@@ -212,19 +235,5 @@ elif menu=="Miniaturas":
 # -------- RESULTADOS --------
 elif menu=="Resultados":
     conn=get_conn()
-    df=pd.read_sql_query("SELECT * FROM matches",conn)
-
-    st.subheader("Filtro por datas")
-
-    start=st.date_input("Data início", value=None)
-    end=st.date_input("Data fim", value=None)
-
-    if st.button("Limpar datas"):
-        start=None
-        end=None
-
-    if start and end:
-        df["date"]=pd.to_datetime(df["date"])
-        df=df[(df["date"]>=str(start))&(df["date"]<=str(end))]
-
-    st.dataframe(df.sort_values("date",ascending=False))
+    df=pd.read_sql_query("SELECT * FROM matches ORDER BY date DESC",conn)
+    st.dataframe(df)
